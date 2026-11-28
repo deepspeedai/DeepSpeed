@@ -390,12 +390,12 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
         optim_sd = torch.load(optim_state_path, weights_only=False)
         self._load_global_state(optim_sd)
-        global_step = None
         # zip below would silently skip the groups that one side lacks.
         if len(optim_sd['param_groups']) != len(self.optimizer.param_groups):
             raise ValueError(f"The universal checkpoint in {checkpoint_dir} has {len(optim_sd['param_groups'])} "
                              f"optimizer parameter groups, but this optimizer has {len(self.optimizer.param_groups)}.")
 
+        global_steps = None
         for i, (param_group,
                 loaded_param_group) in enumerate(zip(self.optimizer.param_groups, optim_sd['param_groups'])):
             # We have an assumption that all params in the same param_group have the same keys
@@ -413,28 +413,32 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                     steps.append(step)
 
             hp_param = param_group['params'][0]
-            if steps:
-                assert all(step == steps[0] for step in steps), f"Steps {steps} are not equal"
+            saved_steps = [step for step in steps if step is not None]
+            if saved_steps:
+                assert all(step == saved_steps[0] for step in saved_steps), f"Steps {saved_steps} are not equal"
 
-            if steps and steps[0] is not None:
-                step_to_restore = steps[0]
+            if saved_steps:
+                step_to_restore = saved_steps[0]
             elif opt_keys:
                 # A rank that owns this group's moments but whose source is ZeRO-3 (no per-parameter
-                # step.pt) gets the source's global step. A rank with no fragment for the group has
+                # step.pt) gets the source's per-group step. A rank with no fragment for the group has
                 # no local optimizer state at all, so it must not be seeded here: writing only a step
                 # would leave an incomplete state entry the optimizer cannot consume at the next step.
-                if global_step is None:
+                if global_steps is None:
                     from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
                     # A rank reaching this branch owns this group's fragment, so pass its params to let the
-                    # helper read this group's step.pt. Only the first group's names are read (global_step is cached).
-                    global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir,
-                                                                [self.param_names[lp] for lp in lp_groups[i]])
-                step_to_restore = global_step
+                    # helper read this group's step.pt. Only the first group's names are read (global_steps is cached).
+                    global_steps = load_universal_optimizer_step(optim_sd, checkpoint_dir,
+                                                                 [self.param_names[lp] for lp in lp_groups[i]])
+                step_to_restore = global_steps.get(i) if isinstance(global_steps, dict) else global_steps
+                if step_to_restore is None and isinstance(global_steps, dict) and global_steps:
+                    # The source did not record this group's step individually; fall back to whichever one it did.
+                    step_to_restore = next(iter(global_steps.values()))
             else:
                 step_to_restore = None
 
             if step_to_restore is not None:
-                # The optimizer advances step in place, and a ZeRO-3 source's step is shared by every group.
+                # The optimizer advances step in place, so give each group its own copy of the restored step.
                 self.optimizer.state[hp_param]['step'] = step_to_restore.clone() if torch.is_tensor(
                     step_to_restore) else step_to_restore
 

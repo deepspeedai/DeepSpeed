@@ -116,6 +116,103 @@ class _DenseStack(torch.nn.Module):
         return torch.nn.functional.mse_loss(x, y)
 
 
+class TestUniversalCheckpointDivergentGroupSteps(DistributedTest):
+    """Every target sub-group restores its OWN group's step, not the first group's step broadcast to all.
+
+    A multi-task model (MT-DNN style) can carry two optimizer groups whose steps have diverged: the shared
+    trunk trained for more steps than a per-task head. Resuming must keep each group's own step. A loader
+    that seeds every sub-group with one shared step instead moves the lagging group to the wrong counter. The
+    checkpoint's per-group steps are made to diverge directly (the scalar group's step is lowered by one),
+    which isolates the exact contract under test: read each group's own step, not the first group's.
+    """
+    world_size = 2
+
+    @pytest.mark.parametrize("source_stage", [1, 2])
+    def test_steps_restore_per_group(self, tmpdir, source_stage):
+        hidden = 4
+        target_stage = 3  # the ZeRO-3 target is where one shared step was broadcast to every sub-group
+
+        class _TrunkScalar(torch.nn.Module):
+            """A shared trunk (group 0) and a trainable scalar scale (group 1)."""
+
+            def __init__(self, hidden):
+                super().__init__()
+                self.trunk = torch.nn.Parameter(torch.randn(hidden, hidden) * 0.1)
+                self.head = torch.nn.Parameter(torch.tensor(0.1))
+
+            def forward(self, x, y):
+                return torch.nn.functional.mse_loss(torch.nn.functional.relu(x @ self.trunk) * self.head, y)
+
+        def _config(stage, load_universal=False):
+            cfg = {
+                "train_batch_size": 4,
+                "zero_optimization": {
+                    "stage": stage,
+                },
+            }
+            if load_universal:
+                cfg["checkpoint"] = {"load_universal": True}
+            return cfg
+
+        steps = 3
+
+        def build():
+            torch.manual_seed(0)
+            model = _TrunkScalar(hidden)
+            # Trunk in one group, scalar in its own: two groups with independent step counters.
+            return model, [{"params": [model.trunk]}, {"params": [model.head]}]
+
+        def state_steps(engine):
+            """(scalar step, trunk steps) read off the restored fp32 state buffers, identified by numel:
+            the scalar is the lone numel==1 buffer, the trunk sub-groups are the larger ones."""
+            scalar = None
+            trunk = []
+            for buffer, state in engine.optimizer.optimizer.state.items():
+                if "step" not in state:
+                    continue
+                if buffer.numel() == 1:
+                    scalar = int(state["step"])
+                else:
+                    trunk.append(int(state["step"]))
+            return scalar, trunk
+
+        generator = torch.Generator().manual_seed(1)
+        data = [torch.randn(2, hidden, generator=generator) for _ in range(steps)]
+
+        model, param_groups = build()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=torch.optim.AdamW(param_groups, lr=0.01),
+                                               config_params=_config(source_stage))
+        data = [t.to(engine.device) for t in data]
+        for batch in data:
+            loss = engine(batch, batch)
+            engine.backward(loss)
+            engine.step()
+        universal_tag = _save_as_universal(engine, tmpdir)
+
+        # Diverge the two groups' steps: lower only the scalar group's saved step by one, so the source
+        # checkpoint genuinely carries [steps, steps - 1] instead of [steps, steps].
+        if dist.get_rank() == 0:
+            head_step = os.path.join(tmpdir, universal_tag, "zero", "head", "step.pt")
+            assert os.path.isfile(head_step), "expected per-parameter step.pt for the scalar group"
+            torch.save(torch.tensor(float(steps - 1), dtype=torch.float32), head_step)
+        dist.barrier()
+
+        model, param_groups = build()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=torch.optim.AdamW(param_groups, lr=0.01),
+                                               config_params=_config(target_stage, load_universal=True))
+        engine.load_checkpoint(tmpdir, tag=universal_tag)
+
+        # The two groups must restore different steps: trunk at its own, scalar at the lowered one. A bug that
+        # broadcasts a single step to every sub-group would give the scalar the trunk's step instead.
+        scalar_step, trunk_steps = state_steps(engine)
+        assert scalar_step is not None, "scalar group's state was not restored"
+        assert scalar_step == steps - 1, f"scalar group restored step {scalar_step}, expected {steps - 1}"
+        assert trunk_steps and set(trunk_steps) == {steps}, f"trunk group steps {trunk_steps}"
+        engine.destroy()
+
+
 class TestUniversalCheckpointPipelineToZeRO3(DistributedTest):
     """A TP2 x PP2 run under ZeRO-1, the most a pipeline engine allows, resumed as ZeRO-3 over 4 data-parallel ranks."""
     world_size = 4

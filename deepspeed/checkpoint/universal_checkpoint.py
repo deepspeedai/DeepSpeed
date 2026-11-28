@@ -247,19 +247,31 @@ def _shape_flat_universal_state(param, tensor, ckpt_file):
 
 
 def load_universal_optimizer_step(optim_sd, checkpoint_dir, param_names):
-    """The optimizer step a universal checkpoint was saved at, whichever ZeRO stage it came from.
+    """The optimizer step each parameter was saved at, whichever ZeRO stage it came from.
 
-    A ZeRO-3 source keeps it in the global optimizer state; a ZeRO-1/2 source writes a step.pt next to
-    each parameter's states.
+    The optimizer advances one counter per parameter group, and a multi-task model can train its groups for
+    different numbers of steps, so restoring one shared step to every group would move some to the wrong
+    counter. Each caller therefore takes the step for the group it owns, looked up from this mapping.
+
+    A ZeRO-3 source keeps the step in the global optimizer state, indexed by its fp32 sub-group; a ZeRO-1/2
+    source writes a step.pt next to each parameter's states, so the steps are keyed by parameter name.
+
+    Returns a mapping; an entry is absent for a group the source never stepped.
     """
     state = optim_sd.get(OPTIMIZER_STATE_DICT, {}).get('state')
     if state:
-        return next(iter(state.values())).get('step')
+        steps = {}
+        for sub_group_id, entry in state.items():
+            step = entry.get('step')
+            if step is not None:
+                steps[sub_group_id] = step
+        return steps
+    steps = {}
     for name in param_names:
         path = os.path.join(checkpoint_dir, name, 'step.pt')
         if os.path.isfile(path):
-            return torch.load(path, weights_only=False)
-    return None
+            steps[name] = torch.load(path, weights_only=False)
+    return steps
 
 
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep_size=1, load_optimizer_states=True):

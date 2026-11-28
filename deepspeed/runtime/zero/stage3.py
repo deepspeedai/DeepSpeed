@@ -4097,7 +4097,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # Generally the step of each optimizer file should be the same, we can obtain from any parameter.
         from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
-        state_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, self.param_names.values())
+        # The source advanced each optimizer group's step independently, so each target sub-group must be restored to
+        # its own group's step, not one shared step broadcast to all. The mapping is keyed by fp32 sub-group
+        # index (ZeRO-3 source) or by parameter name (ZeRO-1/2 source).
+        source_steps = load_universal_optimizer_step(optim_sd, checkpoint_dir, self.param_names.values())
         sub_groups_without_moments = self._sub_groups_without_saved_moments(checkpoint_dir)
         for key in ["fp32", "exp_avg", "exp_avg_sq"]:
             for sub_group_id, fp16_group in enumerate(self.fp16_groups):
@@ -4108,6 +4111,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         self.optimizer.state.pop(fp32_param, None)
                     else:
                         continue
+                if key == "fp32" and sub_group_id not in sub_groups_without_moments:
+                    self._seed_sub_group_step(fp32_param, sub_group_id, source_steps)
                 key_tensor = torch.zeros_like(fp32_param)
                 offset = 0
                 for param in fp16_group:
@@ -4121,10 +4126,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     offset += key_layer_state_partition.numel()
                 if key == "fp32":
                     self.fp32_partitioned_groups_flat[sub_group_id].data.copy_(key_tensor)
-                    if state_step is not None and sub_group_id not in sub_groups_without_moments:
-                        # Each sub-group's optimizer advances its step in place, so give it its own copy.
-                        self.optimizer.state[fp32_param]['step'] = (state_step.clone()
-                                                                    if torch.is_tensor(state_step) else state_step)
                 else:
                     self.optimizer.state[fp32_param][key] = key_tensor
         self._move_state_to_backup_optimizer()
@@ -4218,6 +4219,25 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
                 partitioned_param.data = q.data
+
+    def _seed_sub_group_step(self, fp32_param, sub_group_id, source_steps):
+        """Give this sub-group a private copy of the step the source's matching group was last advanced to.
+
+        ``source_steps`` is keyed by fp32 sub-group index for a ZeRO-3 source and by parameter name for a
+        ZeRO-1/2 source; an entry is absent when the group was never stepped, in which
+        case the sub-group stays without a step, as when fresh.
+        """
+        if sub_group_id in source_steps:
+            step = source_steps[sub_group_id]
+        else:
+            step = None
+            for param in self.fp16_groups[sub_group_id]:
+                step = source_steps.get(self.param_names[param])
+                if step is not None:
+                    break
+        if step is not None:
+            # Each sub-group's optimizer advances its step in place, so give it its own copy.
+            self.optimizer.state[fp32_param]['step'] = step.clone() if torch.is_tensor(step) else step
 
     def _load_global_state_stage3(self, sd):
         self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)
