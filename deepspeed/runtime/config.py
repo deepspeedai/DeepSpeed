@@ -462,7 +462,8 @@ class DeepSpeedConfig(object):
 
         try:
             self.global_rank = dist.get_rank()
-            if mpu is not None:
+            from deepspeed.utils.groups import TensorParallelGroups
+            if mpu is not None and not isinstance(mpu, TensorParallelGroups):
                 # Ulysses SP
                 if not hasattr(mpu, "get_data_parallel_world_size"):
                     self.world_size = dist.get_world_size() / mpu.get_sequence_parallel_world_size()
@@ -471,7 +472,8 @@ class DeepSpeedConfig(object):
             elif mesh_device is not None:
                 self.world_size = dist.get_world_size(mesh_device.get_group(mesh_dim="data_parallel"))
             else:
-                # HF zero.init case where there is no mpu
+                # HF zero.init case where there is no mpu. An engine's TensorParallelGroups keep the batch sizes
+                # of an AutoTP engine without an mpu (#9081).
                 if "sequence_parallel_size" in config:
                     self.world_size = dist.get_world_size() / config["sequence_parallel_size"]
                 else:

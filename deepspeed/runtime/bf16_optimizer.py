@@ -57,7 +57,9 @@ class BF16_Optimizer(ZeROOptimizer):
         from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
         self._uses_muon = isinstance(init_optimizer, MuonWithAuxAdam)
         if self._uses_muon:
-            if grad_acc_dtype != torch.float32 or has_moe_layers or mpu is not None:
+            from deepspeed.utils.groups import _is_dense_data_parallel
+            dense_dp = mpu is None or _is_dense_data_parallel(mpu)
+            if grad_acc_dtype != torch.float32 or has_moe_layers or not dense_dp:
                 raise ValueError("BF16 Muon currently requires FP32 accumulation, dense DP and eager execution")
             for group in init_optimizer.param_groups:
                 if group.get('use_muon', False):

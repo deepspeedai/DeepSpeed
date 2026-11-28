@@ -277,6 +277,13 @@ def autotp_storage_affine_maps(model, optimizer_states=False, tp_group=None):
     ``2 * ndim - 1`` boxes; any other layout piece keeps one piece per row.
     """
     if tp_group is None:
+        tp_group = getattr(model, '_ds_autotp_group', None)
+    if tp_group is None:
+        # The group the layers were sharded over, which an engine with groups of its own does not publish.
+        from deepspeed.module_inject.layers import TensorParallel_Layer
+        tp_group = next((module.mp_group for module in model.modules()
+                         if isinstance(module, TensorParallel_Layer) and module.mp_group is not None), None)
+    if tp_group is None:
         from deepspeed.utils import groups
         tp_group = groups.get_tensor_model_parallel_group()
     tp_world_size = dist.get_world_size(group=tp_group)
@@ -318,7 +325,12 @@ def autotp_storage_affine_maps(model, optimizer_states=False, tp_group=None):
         if optimizer_states:
             storage_maps = zero_optimizer_storage_affine_maps(params)
         else:
-            storage_maps = [zero_param_storage_affine_map(param) for param in params]
+            default_dp_group = getattr(model, '_ds_autotp_dp_group', None)
+            storage_maps = [
+                zero_param_storage_affine_map(param,
+                                              replica_group=getattr(param, '_dp_group', None) or default_dp_group)
+                for param in params
+            ]
         local = [None if storage_map is None else storage_map.to_dict() for storage_map in storage_maps]
     gathered = [None] * tp_world_size
     dist.all_gather_object(gathered, local, group=tp_group)
