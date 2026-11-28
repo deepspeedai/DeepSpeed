@@ -162,6 +162,18 @@ def _capacity(gates: Tensor, capacity_factor: Tensor, min_capacity: Tensor) -> T
     return torch.maximum(capacity, min_capacity.to(torch.int64))
 
 
+def _capacity_for_group(capacity, ep_group, device):
+    # Every source rank must send the same number of slots to each expert rank.
+    if pg_utils.is_parallel(ep_group):
+        capacity = capacity.to(device)
+        dist.all_reduce(capacity, op=dist.ReduceOp.MAX, group=ep_group)
+    # The dispatch splits the capacity dimension to remove tensor-parallel duplicates.
+    tp = 1 if groups.mpu is None else bwc_tensor_model_parallel_world_size(mpu=groups.mpu)
+    if tp > 1:
+        capacity = ((capacity + tp - 1) // tp) * tp
+    return capacity
+
+
 def _stack_routes(routes: Tensor, dtype: Optional[torch.dtype] = None) -> Tensor:
     """Turn a [s, k] per-route tensor into the contiguous [k, s] block the dispatch uses.
 
@@ -246,17 +258,8 @@ def top1gating(logits: Tensor,
 
     # if we don't want to drop any tokens
     if not drop_tokens:
-        new_capacity = torch.max(exp_counts).to(logits.device)
-        # Communicate across expert processes to pick the maximum capacity.
-        if pg_utils.is_parallel(ep_group):
-            dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
-        if groups._get_expert_model_parallel_world_size() == 1:
-            # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
-            # This is since we are going to activate drop_tokens() to drop duplicate tokens.
-            tp = 1 if groups.mpu is None else bwc_tensor_model_parallel_world_size(mpu=groups.mpu)
-            new_capacity = torch.ceil(new_capacity / tp).mul(tp).to(new_capacity.dtype)
-        # Make sure the capacity value does not exceed the number of tokens.
-        capacity = min(new_capacity, torch.tensor(mask1.size(0)).to(new_capacity.device))
+        capacity = torch.max(exp_counts)
+    capacity = _capacity_for_group(capacity, ep_group, logits.device)
 
     # Compute l_aux
     me = torch.mean(gates, dim=0)
@@ -360,21 +363,13 @@ def top2gating(logits: Tensor,
     exp_counts = torch.sum(mask1 + mask2, dim=0).detach().to(logits.device)
 
     if drop_tokens:
-        # Calculate configured capacity and remove locations outside capacity from mask
         capacity = _capacity(gates, torch.tensor(capacity_factor * 2), torch.tensor(min_capacity))
+    else:
+        capacity = torch.max(exp_counts)
+    capacity = _capacity_for_group(capacity, ep_group, logits.device)
+    if drop_tokens:
         mask1 *= torch.lt(locations1, capacity)
         mask2 *= torch.lt(locations2, capacity)
-    else:
-        # Do not drop tokens - set capacity according to current expert assignments
-        new_capacity = torch.max(exp_counts)
-        if pg_utils.is_parallel(ep_group):
-            dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
-        if groups._get_expert_model_parallel_world_size() == 1:
-            # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
-            # This is since we are going to activate drop_tokens() to drop duplicate tokens.
-            tp = 1 if groups.mpu is None else bwc_tensor_model_parallel_world_size(mpu=groups.mpu)
-            new_capacity = torch.ceil(new_capacity / tp).mul(tp).to(new_capacity.dtype)
-        capacity = new_capacity
 
     # Store the capacity location for each token
     locations1_s = torch.sum(locations1 * mask1, dim=1)
@@ -444,7 +439,7 @@ def topkgating(
     if drop_tokens:
         # Calculate configured capacity and remove locations outside capacity from mask
         capacity = _capacity(gates, torch.tensor(capacity_factor * k), torch.tensor(min_capacity))
-        # update mask and locations by capacity
+        capacity = _capacity_for_group(capacity, ep_group, logits.device)
 
         if drop_policy == 'probs':
             topk_masked_gates = torch.zeros_like(gates).scatter(1, top_idx, top_gate)
@@ -464,15 +459,7 @@ def topkgating(
 
     else:
         # Do not drop tokens - set capacity according to current expert assignments
-        new_capacity = torch.max(exp_counts)
-        if pg_utils.is_parallel(ep_group):
-            dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
-        if groups._get_expert_model_parallel_world_size() == 1:
-            # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
-            # This is since we are going to activate drop_tokens() to drop duplicate tokens.
-            tp = 1 if groups.mpu is None else bwc_tensor_model_parallel_world_size(mpu=groups.mpu)
-            new_capacity = torch.ceil(new_capacity / tp).mul(tp).to(new_capacity.dtype)
-        capacity = new_capacity
+        capacity = _capacity_for_group(torch.max(exp_counts), ep_group, logits.device)
         locations = torch.cumsum(mask, dim=0) - 1
 
     # normalize gates

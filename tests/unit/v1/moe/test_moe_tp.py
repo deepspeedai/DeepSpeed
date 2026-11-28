@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import copy
 import torch
 import deepspeed
 import pytest
@@ -126,3 +127,46 @@ class TestMOETensorParallelTutel(DistributedTest):
                 outputs.append(model(inputs)[0])
 
         assert torch.allclose(outputs[0], outputs[1])
+
+
+class TestMoECapacityTensorParallel(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("enable_expert_tp", [True, False])
+    @pytest.mark.parametrize("k", [1, 2, 4])
+    @pytest.mark.parametrize("drop_tokens", [True, False])
+    def test_training(self, monkeypatch, k, drop_tokens, enable_expert_tp):
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(1234)
+        inputs = torch.randn(3, 8, device=device, requires_grad=True)
+        with torch.no_grad():
+            inputs[:, 0] = 1
+        model = MoE(8,
+                    torch.nn.Linear(8, 8, bias=False),
+                    num_experts=4,
+                    ep_size=1,
+                    k=k,
+                    min_capacity=0,
+                    drop_tokens=drop_tokens,
+                    use_rts=False,
+                    enable_expert_tensor_parallelism=enable_expert_tp,
+                    top2_2nd_expert_sampling=False).to(device)
+        with torch.no_grad():
+            model.deepspeed_moe.gate.wg.weight.zero_()
+            model.deepspeed_moe.gate.wg.weight[:, 0] = torch.tensor([2, 1, -1, -2], device=device)
+        local_capacity = (3 * k + 3) // 4 if drop_tokens else 3
+        capacity = ((local_capacity + self.world_size - 1) // self.world_size) * self.world_size
+        reference = copy.deepcopy(model)
+        reference.deepspeed_moe.gate.min_capacity = capacity if drop_tokens else 0
+        expected, expected_aux, _ = reference(inputs)
+        (expected.square().mean() + expected_aux).backward()
+        expected_grad = inputs.grad.detach().clone()
+        inputs.grad = None
+
+        monkeypatch.setattr(deepspeed.utils.groups, "mpu", MPU(self.world_size))
+        model.set_deepspeed_parallelism()
+        output, aux, _ = model(inputs)
+        torch.testing.assert_close(output, expected)
+        torch.testing.assert_close(aux, expected_aux)
+        (output.square().mean() + aux).backward()
+        torch.testing.assert_close(inputs.grad, expected_grad)
