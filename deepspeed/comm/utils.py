@@ -114,8 +114,10 @@ def get_msg_size_from_args(func, *args, **kwargs):
     # check if tensor arg is in args
     if len(args) > 0:
         tensor_arg_position = get_tensor_position(func)
-        if tensor_arg_position > -1:
-            tensor_arg = args[get_tensor_position(func)]
+        # The tensor may still be passed by keyword after other positional args,
+        # e.g. all_gather_into_tensor(output, tensor=input)
+        if -1 < tensor_arg_position < len(args):
+            tensor_arg = args[tensor_arg_position]
     # check if tensor arg is in kwargs
     if tensor_arg is None and len(kwargs) > 0:
         tensor_arg = get_tensor_kwarg(func, kwargs)
