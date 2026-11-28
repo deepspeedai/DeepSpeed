@@ -238,6 +238,42 @@ class TestB2Transfer(DistributedTest):
         with pytest.raises(AffineTransferExecutionError, match='batch schedule'):
             execute_transfers(requests, endpoints, torch.float32)
 
+    @pytest.mark.parametrize('failure', [KeyError('chunk'), TypeError('chunk')], ids=['whitelisted', 'unexpected'])
+    def test_a_copier_that_fails_on_one_process_refuses_everywhere(self, failure):
+        """A copier is caller code, and its errors are not the executor's to sort by kind.
+
+        A refusal keyed on which kind the caller raises would let one kind escape a lone process
+        while its peers wait, so every kind must reach the same collective refusal: this asserts
+        that all ranks see the collective outcome, and that rank 0's error kind never leaks.
+        """
+        _join_transfer_group()
+        rank = dist.get_rank()
+        source, target = _row_to_column(self.world_size)
+        full = _full(16, 16, torch.float32)
+        endpoints = TransferEndpoints(source={loc: loc
+                                              for loc in source.shard_shapes},
+                                      target={loc: loc
+                                              for loc in target.shard_shapes})
+        plan = plan_transfer(target, source)
+        requests = [
+            TransferRequest(
+                str(index), plan, {
+                    location: source.extract(full, location).contiguous()
+                    for location, process in endpoints.source.items() if process == rank
+                }, _targets(target, endpoints, torch.float32)) for index in range(4)
+        ]
+
+        def copier(pairs):
+            if rank == 0:
+                raise failure
+            return sequential_copies(list(pairs))
+
+        with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch'):
+            prepare_transfers(requests, endpoints, torch.float32, StagingBudget(1 << 20), copier=copier)
+        for request in requests:
+            for buffer in request.target_buffers.values():
+                assert torch.isnan(buffer).all().item()
+
 
 class TestB2Schedule(DistributedTest):
     world_size = 2
@@ -529,58 +565,6 @@ class TestB2Prepared(DistributedTest):
         for targets, target_map, full in other_checks:
             _assert_matches(targets, target_map, full + 1000.0)
 
-    @pytest.mark.parametrize('failure', [AssertionError('no'), OSError('io')])
-    def test_a_copier_that_fails_on_one_process_refuses_everywhere(self, failure):
-        """A copier is caller code, and its errors are not the executor's to sort by kind.
-
-        A refusal keyed on which kind the caller raises would let one kind escape a lone process
-        while its peers wait, so every kind must reach the same collective refusal: this asserts
-        that all ranks see the collective outcome, and that rank 0's error kind never leaks.
-        """
-        _join_transfer_group()
-        rank = dist.get_rank()
-        source, target = _row_to_column(self.world_size)
-        full = _full(16, 16, torch.float32)
-        endpoints = TransferEndpoints(source={loc: loc
-                                              for loc in source.shard_shapes},
-                                      target={loc: loc
-                                              for loc in target.shard_shapes})
-        plan = plan_transfer(target, source)
-        requests = [
-            TransferRequest(
-                str(index), plan, {
-                    location: source.extract(full, location).contiguous()
-                    for location, process in endpoints.source.items() if process == rank
-                }, _targets(target, endpoints, torch.float32)) for index in range(4)
-        ]
-
-        def copier(pairs):
-            if rank == 0:
-                raise failure
-            return sequential_copies(list(pairs))
-
-        with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch'):
-            prepare_transfers(requests, endpoints, torch.float32, StagingBudget(1 << 20), copier=copier)
-        for request in requests:
-            for buffer in request.target_buffers.values():
-                assert torch.isnan(buffer).all().item()
-
-        fail_restage = False
-
-        def restage_copier(pairs):
-            if fail_restage and rank == 0:
-                raise failure
-            return sequential_copies(list(pairs))
-
-        prepared = prepare_transfers(requests, endpoints, torch.float32, StagingBudget(64), copier=restage_copier)
-        prepared.release_staging()
-        fail_restage = True
-        with pytest.raises(AffineTransferExecutionError, match='could not rebuild the released staging'):
-            prepared.run()
-        for request in requests:
-            for buffer in request.target_buffers.values():
-                assert torch.isnan(buffer).all().item()
-
 
 def _window_batch(window, placement, dtype):
     """A row-to-column batch whose sources, targets, both or neither are carved from ``window``."""
@@ -663,6 +647,37 @@ class TestWindowTransfer(DistributedTest):
         for buffer in request.target_buffers.values():
             assert buffer.isnan().all(), 'a refused batch must not write'
 
+    @pytest.mark.parametrize('failure', [RuntimeError('map'), OSError('map')], ids=['whitelisted', 'unexpected'])
+    def test_a_one_shot_refuses_whole_before_data_moves_when_a_map_fails_on_one_rank(self, failure):
+        """A one-shot's map into a peer's window can fail on one process after the agreement.
+
+        That must refuse every process before a message or write begins, as the prepare path does
+        for the same failure; a map built lazily in the move would let the other ranks write, and an
+        error kind not caught by name would escape one process while its peers wait.
+        """
+        if get_accelerator().device_name() not in ('cuda', 'xpu'):
+            pytest.skip('symmetric memory needs a CUDA or XPU device')
+        _join_transfer_group()
+        rank, world_size = dist.get_rank(), dist.get_world_size()
+        dtype = torch.bfloat16
+        window = TransferWindow(1 << 20)
+        endpoints, request, _, _, _ = _window_batch(window, 'both_pull', dtype)
+        # Both sides lie in the window, so the move makes no messages at all: with maps built lazily in
+        # the move, a one process failing alone would leave its peers at the final barrier while it
+        # raised, and a map failure not in the refusal whitelist would escape it for the same reason.
+        real_peer = TransferWindow.peer
+
+        def peer(self, process, dtype):
+            if rank == 0:
+                raise failure
+            return real_peer(self, process, dtype)
+
+        with mock.patch.object(TransferWindow, 'peer', side_effect=peer):
+            with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch'):
+                execute_transfers([request], endpoints, dtype, StagingBudget(), window=window)
+        for buffer in request.target_buffers.values():
+            assert buffer.isnan().all(), 'a refused batch must not write'
+
     def test_different_windows_on_different_ranks_are_refused(self):
         if get_accelerator().device_name() not in ('cuda', 'xpu'):
             pytest.skip('symmetric memory needs a CUDA or XPU device')
@@ -733,36 +748,175 @@ class TestWindowTransfer(DistributedTest):
         assert 'a source and a target overlap' in str(refused.value.__cause__)
         assert torch.equal(shard, before), 'a refused batch must not write'
 
-    @pytest.mark.parametrize('failure', [AssertionError('no'), RuntimeError('peer map failed')])
-    def test_a_one_shot_refuses_whole_before_data_moves_when_a_map_fails_on_one_rank(self, failure):
-        """A one-shot's map into a peer's window can fail on one process after the agreement.
 
-        That must refuse every process before a message or write begins, as the prepare path does
-        for the same failure; a map built lazily in the move would let the other ranks write, and an
-        error kind not caught by name would escape one process while its peers wait.
-        """
-        if get_accelerator().device_name() not in ('cuda', 'xpu'):
-            pytest.skip('symmetric memory needs a CUDA or XPU device')
+class TestWindowAcrossHosts(DistributedTest):
+    world_size = 4
+
+    @pytest.mark.parametrize('puts', [True, False, 'auto', 'pack'])
+    def test_puts_and_staged_rounds_cross_hosts(self, puts):
+        if get_accelerator().device_name() != 'cuda':
+            pytest.skip('puts between hosts need CUDA')
         _join_transfer_group()
-        rank = dist.get_rank()
         dtype = torch.bfloat16
-        window = TransferWindow(1 << 20)
-        endpoints, request, _, _, _ = _window_batch(window, 'both_pull', dtype)
-        # Both sides lie in the window, so the move makes no messages at all: with maps built lazily in
-        # the move, one process failing alone would leave its peers at the final barrier while it
-        # raised, and a map failure not in the refusal whitelist would escape it for the same reason.
-        real_peer = TransferWindow.peer
+        rank = dist.get_rank()
+        # Two processes per host; NCCL reaches a peer on the same machine just as it reaches one elsewhere.
+        # NCCL maps every window on one machine, so map only the fake host's.
+        with mock.patch('deepspeed.checkpoint.affine_transfer_executor.socket.gethostname',
+                        return_value=f'host{rank // 2}'), \
+                mock.patch('deepspeed.comm.symm_mem_mapped_peers', return_value=[rank // 2 * 2, rank // 2 * 2 + 1]):
+            try:
+                # Each process packs for, or unpacks from, two processes of the other host.
+                window = TransferWindow(1 << 20, puts=True, pack_bytes=4096) if puts == 'pack' else TransferWindow(
+                    1 << 20, puts=puts)
+            except RuntimeError as error:
+                if 'newer torch' in str(error):
+                    pytest.skip(str(error))
+                raise
+        assert window.hosts == (0, 0, 2, 2)
+        assert dist.symm_mem_mapped_peers(window._handle) == [0, 1, 2, 3]
+        # Row to column: same-host chunks are pulled, while chunks between hosts are strided and staged.
+        endpoints, strided, source, target, _ = _window_batch(window, 'both_pull', dtype)
+        # Rows to rows on the other host: packed on both sides, so put if the window allows. A small budget
+        # cuts them into chunks adjacent on both sides, which land only if they are put whole or each counted.
+        rows = contiguous_split_map((16, 16), [4] * 4, 0)
+        shifted = TransferEndpoints({location: location
+                                     for location in range(4)},
+                                    {location: (location + 2) % 4
+                                     for location in range(4)})
+        row_sources = {rank: window.tensor((4, 16), dtype)}
+        row_targets = {(rank + 2) % 4: window.tensor((4, 16), dtype).fill_(UNWRITTEN)}
+        packed = TransferRequest('rows', plan_transfer(rows, rows, PlanBudget()), row_sources, row_targets)
+        # Every request in a batch shares its endpoints, so the two run as separate batches over one window.
+        budget = StagingBudget(16)
+        # Small enough that 'auto' puts the rows, as the row batch carries one parameter to one peer.
+        with mock.patch.object(TransferWindow, 'AUTO_PUT_BYTES', 4 * 16 * 2):
+            prepared = [
+                prepare_transfers([strided], endpoints, dtype, budget, window=window),
+                prepare_transfers([packed], shifted, dtype, budget, window=window)
+            ]
 
-        def peer(self, process, dtype):
-            if rank == 0:
-                raise failure
-            return real_peer(self, process, dtype)
+        full = _full(16, 16, dtype)
+        for run, values in enumerate((full, full.flip(0), full.flip(1))):
+            for location, buffer in strided.source_buffers.items():
+                buffer.copy_(source.extract(values, location))
+            row_sources[rank].copy_(rows.extract(values, rank))
+            stats = [handle.run(check=run == 0) for handle in prepared]
+            _assert_matches(strided.target_buffers, target, values)
+            _assert_matches(row_targets, rows, values)
+        for buffer in list(strided.target_buffers.values()) + list(row_targets.values()):
+            buffer.fill_(UNWRITTEN)
+        with mock.patch.object(TransferWindow, 'AUTO_PUT_BYTES', 4 * 16 * 2):
+            assert execute_transfers([packed], shifted, dtype, budget, window=window) == stats[1]
+            assert execute_transfers([strided], endpoints, dtype, budget, window=window) == stats[0]
+        _assert_matches(row_targets, rows, values)
+        _assert_matches(strided.target_buffers, target, values)
+        packs = puts == 'pack'
+        if packs:
+            # A handle prepared with the reserve refuses once it is gone, and a reserve without puts is refused.
+            window.pack_bytes, reserve = 0, window.pack_bytes
+            with pytest.raises(AffineTransferExecutionError, match='moved or changed'):
+                prepared[0].run()
+            window.puts, window.pack_bytes = False, reserve
+            with pytest.raises(AffineTransferExecutionError):
+                execute_transfers([strided], endpoints, dtype, budget, window=window)
+            window.puts = True
+        puts = bool(puts)
 
-        with mock.patch.object(TransferWindow, 'peer', side_effect=peer):
-            with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch'):
-                execute_transfers([request], endpoints, dtype, StagingBudget(), window=window)
-        for buffer in request.target_buffers.values():
-            assert buffer.isnan().all(), 'a refused batch must not write'
+        element_size = full.element_size()
+        moved = torch.tensor([stats[0].sent_bytes, stats[1].sent_bytes, stats[1].mapped_bytes], device=_device())
+        dist.all_reduce(moved)
+        # The sources are the rows on host 0, and host 1 holds half of the columns.
+        rows_bytes = full.numel() * element_size
+        assert moved.tolist() == [
+            0 if packs else rows_bytes // 2, 0 if puts else rows_bytes, rows_bytes if puts else 0
+        ]
+
+    @pytest.mark.parametrize('pack', [False, True])
+    @pytest.mark.parametrize('prepared', [False, True])
+    def test_a_region_put_or_packed_here_while_it_is_read_is_refused(self, pack, prepared):
+        if get_accelerator().device_name() != 'cuda':
+            pytest.skip('puts between hosts need CUDA')
+        _join_transfer_group()
+        dtype, rank = torch.bfloat16, dist.get_rank()
+        with mock.patch('deepspeed.checkpoint.affine_transfer_executor.socket.gethostname',
+                        return_value=f'host{rank // 2}'), \
+                mock.patch('deepspeed.comm.symm_mem_mapped_peers', return_value=[rank // 2 * 2, rank // 2 * 2 + 1]):
+            try:
+                window = TransferWindow(1 << 20, puts=True, pack_bytes=4096 if pack else 0)
+            except RuntimeError as error:
+                if 'newer torch' in str(error):
+                    pytest.skip(str(error))
+                raise
+        # Every operation crosses hosts, so none is in a round, and each process receives into the memory it
+        # sends from. Rows to rows are packed on both sides and put; column bands to narrower ones are strided
+        # on the source side and packed into the reserve.
+        if pack:
+            source_map = contiguous_split_map((4, 16), [4] * 4, 1)
+            target_map = contiguous_split_map((4, 16), [2] * 8, 1)
+            endpoints = TransferEndpoints({location: location
+                                           for location in range(4)},
+                                          {location: (location // 2 + 2) % 4
+                                           for location in range(8)})
+            shard = window.tensor((4, 4), dtype)
+            shard.copy_(source_map.extract(_full(4, 16, dtype), rank))
+            held = [location for location in range(8) if endpoints.target[location] == rank]
+            targets = {
+                location: shard.view(-1)[8 * index:8 * (index + 1)].view(4, 2)
+                for index, location in enumerate(held)
+            }
+        else:
+            source_map = target_map = contiguous_split_map((16, 16), [4] * 4, 0)
+            endpoints = TransferEndpoints({location: location
+                                           for location in range(4)},
+                                          {location: (location + 2) % 4
+                                           for location in range(4)})
+            shard = window.tensor((4, 16), dtype)
+            shard.copy_(source_map.extract(_full(16, 16, dtype), rank))
+            targets = {(rank + 2) % 4: shard}
+        before = shard.clone()
+        request = TransferRequest('weight', plan_transfer(target_map, source_map, PlanBudget()), {rank: shard},
+                                  targets)
+        call = prepare_transfers if prepared else execute_transfers
+        with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch') as refused:
+            call([request], endpoints, dtype, StagingBudget(16), window=window)
+        assert 'a source and a target overlap' in str(refused.value.__cause__)
+        assert torch.equal(shard, before), 'a refused batch must not write'
+
+    def test_hosts_that_map_each_other_copy_in_place(self):
+        if get_accelerator().device_name() != 'cuda':
+            pytest.skip('a window across hosts needs CUDA')
+        _join_transfer_group()
+        dtype = torch.bfloat16
+        rank = dist.get_rank()
+        # Four hostnames on one machine, as hosts sharing an NVLink domain: NCCL maps every window, so
+        # nothing is put or staged.
+        with mock.patch('deepspeed.checkpoint.affine_transfer_executor.socket.gethostname',
+                        return_value=f'host{rank}'):
+            try:
+                window = TransferWindow(1 << 20, puts=True)
+            except RuntimeError as error:
+                if 'newer torch' in str(error):
+                    pytest.skip(str(error))
+                raise
+        assert window.hosts == (0, 0, 0, 0)
+        rows = contiguous_split_map((16, 16), [4] * 4, 0)
+        shifted = TransferEndpoints({location: location
+                                     for location in range(4)},
+                                    {location: (location + 2) % 4
+                                     for location in range(4)})
+        plan = plan_transfer(rows, rows, PlanBudget())
+        logical = torch.arange(256, dtype=torch.float32).view(16, 16).to(dtype).to(get_accelerator().device_name())
+        source = {rank: window.tensor((4, 16), dtype)}
+        source[rank].copy_(rows.extract(logical, rank))
+        target = {(rank + 2) % 4: window.tensor((4, 16), dtype)}
+        stats = execute_transfers([TransferRequest('rows', plan, source, target)],
+                                  shifted,
+                                  dtype,
+                                  StagingBudget(16),
+                                  window=window)
+        assert stats.sent_bytes == 0 and stats.mapped_bytes == 4 * 16 * 2
+        for location, tensor in target.items():
+            assert torch.equal(tensor, rows.extract(logical, location))
 
 
 class TestB2DisjointEndpoints(DistributedTest):
@@ -1044,6 +1198,101 @@ class TestB2TransferCPU:
             assert windowed[process].local_copy_elements == staged[process].local_copy_elements
         with pytest.raises(AffineTransferExecutionError, match='window_locations'):
             schedule_transfers([plan, plan], endpoints, StagingBudget(8), 4, window_locations=locations[:1])
+
+    def test_schedule_keeps_only_strided_operations_between_hosts_in_the_rounds(self):
+        rows = plan_transfer(contiguous_split_map((6, 4), [2, 4], 0), contiguous_split_map((6, 4), [3, 3], 0))
+        columns = plan_transfer(contiguous_split_map((6, 4), [2, 2], 1), contiguous_split_map((6, 4), [3, 3], 0))
+        endpoints = TransferEndpoints({0: 0, 1: 1}, {0: 0, 1: 1})
+        everywhere = [({0, 1}, {0, 1})] * 2
+        # Whole regions per chunk: a budget of one row would make every column chunk packed too.
+        budget = StagingBudget(1024)
+        # One host maps every window, so nothing is staged.
+        one_host = schedule_transfers([rows, columns], endpoints, budget, 4, None, everywhere, (0, 0))
+        assert all(not schedule.sends and not schedule.receives for schedule in one_host.values())
+        # Between hosts a packed row is one put, while a column is strided and must be staged.
+        two_hosts = schedule_transfers([rows, columns], endpoints, budget, 4, None, everywhere, (0, 1), True)
+        columns_only = schedule_transfers([columns], endpoints, budget, 4)
+        # A window that does not put stages everything between hosts.
+        no_puts = schedule_transfers([rows, columns], endpoints, budget, 4, None, everywhere, (0, 1))
+        staged = schedule_transfers([rows, columns], endpoints, budget, 4)
+        # Each column chunk lands as one packed block, so without a window it is received in place; in a
+        # window it goes through the arena, since NCCL leaves send/recv undefined between registered memory
+        # and ordinary memory on the peer.
+        assert any(scheduled.direct for schedule in columns_only.values() for rounds in schedule.receives.values()
+                   for scheduled in rounds)
+
+        def staged_only(rounds_by_peer):
+            return {
+                peer: tuple(replace(scheduled, direct=False) for scheduled in rounds)
+                for peer, rounds in rounds_by_peer.items()
+            }
+
+        for process in (0, 1):
+            assert two_hosts[process].sends == staged_only(columns_only[process].sends)
+            assert two_hosts[process].receives == staged_only(columns_only[process].receives)
+            assert no_puts[process].sends == staged_only(staged[process].sends)
+            assert no_puts[process].receives == staged_only(staged[process].receives)
+        with pytest.raises(AffineTransferExecutionError, match='window_hosts'):
+            schedule_transfers([rows], endpoints, budget, 4, None, everywhere[:1], (0, ))
+
+    def test_auto_puts_only_from_a_process_that_sends_one_peer_enough(self):
+        rows = contiguous_split_map((8, 4), [2] * 4, 0)
+        mirror = plan_transfer(rows, rows)
+        shifted = TransferEndpoints({location: location for location in range(4)}, {l: (l + 2) % 4 for l in range(4)})
+        # Each source block split between both processes of the other host.
+        halves = plan_transfer(contiguous_split_map((8, 4), [1] * 8, 0), rows)
+        fanned = TransferEndpoints({location: location
+                                    for location in range(4)}, {t: (2 if t < 4 else 0) + t % 2
+                                                                for t in range(8)})
+        hosts, budget = (0, 0, 2, 2), StagingBudget(1024)
+
+        def staged_peers(plans, endpoints):
+            locations = [({0, 1, 2, 3}, set(range(8)))] * len(plans)
+            schedule = schedule_transfers(plans, endpoints, budget, 4, None, locations, hosts, 'auto')
+            return [sorted(schedule[process].sends) for process in range(4)]
+
+        many = TransferWindow.AUTO_PUT_PARAMETERS
+        assert staged_peers([mirror] * many, shifted) == [[]] * 4
+        assert staged_peers([mirror] * (many - 1), shifted) == [[2], [3], [0], [1]]
+        assert staged_peers([halves] * many, fanned) == [[2, 3]] * 2 + [[0, 1]] * 2
+        # Two rows of four float32 elements per process.
+        with mock.patch.object(TransferWindow, 'AUTO_PUT_BYTES', 32):
+            assert staged_peers([mirror], shifted) == [[]] * 4
+        with mock.patch.object(TransferWindow, 'AUTO_PUT_BYTES', 33):
+            assert staged_peers([mirror], shifted) == [[2], [3], [0], [1]]
+        # A strided column to a second peer on the other host counts as fanning out, so nothing is put.
+        columns = plan_transfer(contiguous_split_map((8, 4), [1] * 4, 1), rows)
+        plans = [mirror] * many + [columns]
+        locations = [({0, 1, 2, 3}, set(range(8)))] * len(plans)
+        auto = schedule_transfers(plans, shifted, budget, 4, None, locations, hosts, 'auto')
+        staged = schedule_transfers(plans, shifted, budget, 4, None, locations, hosts, False)
+        assert auto == staged
+        with pytest.raises(AffineTransferExecutionError, match="'auto'"):
+            TransferWindow(1 << 20, puts='always')
+        with pytest.raises(AffineTransferExecutionError, match='puts=True'):
+            TransferWindow(1 << 20, puts='auto', pack_bytes=512)
+
+    def test_pack_takes_pairs_between_hosts_out_of_the_rounds_while_they_fit(self):
+        # Rows to columns: every chunk between the two hosts is strided, so it can only be staged or packed.
+        columns = plan_transfer(contiguous_split_map((8, 8), [2] * 4, 1), contiguous_split_map((8, 8), [2] * 4, 0))
+        endpoints = TransferEndpoints({l: l for l in range(4)}, {l: l for l in range(4)})
+        hosts, budget = (0, 0, 2, 2), StagingBudget(1024)
+        everywhere = [({0, 1, 2, 3}, {0, 1, 2, 3})]
+
+        def staged_peers(pack_bytes):
+            schedule = schedule_transfers([columns], endpoints, budget, 4, None, everywhere, hosts, True, pack_bytes)
+            return [sorted(schedule[process].sends) for process in range(4)]
+
+        # Each pair carries a 2x2 block of 16 bytes, which takes one 512-byte slot of each end's reserve.
+        assert staged_peers(0) == [[2, 3], [2, 3], [0, 1], [0, 1]]
+        assert staged_peers(4 * 512) == [[]] * 4
+        # Two slots per process: pairs are laid out in order, so what 0 and 1 send fills every reserve and what
+        # 2 and 3 send back is staged.
+        assert staged_peers(2 * 512) == [[], [], [0, 1], [0, 1]]
+        # The schedule refuses a reserve that no window could have.
+        for puts, pack_bytes in ((False, 512), ('auto', 512), (True, -1), ('always', 0)):
+            with pytest.raises(AffineTransferExecutionError):
+                schedule_transfers([columns], endpoints, budget, 4, None, everywhere, hosts, puts, pack_bytes)
 
     def test_shared_plan_uses_each_buffer_and_rechecks_each_call(self):
         map_ = replicated_map((3, 4), 1)
