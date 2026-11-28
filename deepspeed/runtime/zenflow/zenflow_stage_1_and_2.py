@@ -691,7 +691,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             src_tensor = src_tensor.to(self.master_weights_and_grads_dtype)
 
         dest_tensor.copy_(src_tensor, non_blocking=True)
-        param.grad = None  #offload only
+        self.clear_grad_attribute(param)  #offload only
 
     def _wait_for_optimizer_process(self):
         """Block until the optimizer process signals the submitted step is done.
