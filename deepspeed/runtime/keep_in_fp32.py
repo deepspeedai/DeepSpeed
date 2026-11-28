@@ -100,6 +100,8 @@ def keep_tensors_in_fp32(module, pattern, include_params=True):
             logger.warning_once("data_types.keep_in_fp32_modules: parameters stored quantized "
                                 "(zero_quantized_nontrainable_weights) stay quantized")
             continue
+        if hasattr(tensor, "_ds_zero_init_dtype"):
+            tensor._ds_zero_init_dtype = torch.float32
         if _stored_dtype(tensor) == torch.float32:
             continue
         if partition is not None:

@@ -262,7 +262,7 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.
         if kwargs.get("device", None) is None and target_device is not None:
             kwargs['device'] = target_device
         tensor: Tensor = fn(*args, **kwargs)
-        if target_fp_dtype is not None and tensor.is_floating_point():
+        if target_fp_dtype is not None and kwargs.get("dtype") is None and tensor.is_floating_point():
             tensor.data = tensor.data.to(target_fp_dtype)
 
         return tensor
@@ -280,7 +280,7 @@ def get_new_tensor_fn_for_dtype(target_fp_dtype: torch.dtype, target_device: tor
         else:
             tensor = _orig_torch_empty(0, device=target_device).new_empty(*args, **kwargs)
 
-        if tensor.is_floating_point() and target_fp_dtype is not None:
+        if tensor.is_floating_point() and target_fp_dtype is not None and kwargs.get("dtype") is None:
             tensor = tensor.to(target_fp_dtype)
 
         return tensor
@@ -632,6 +632,22 @@ class InsertPostInitMethodToModuleSubClasses(object):
     def _add_tensor_creation_wrappers(self):
         if DeepSpeedTensorOverride.dtype in self.tensor_overrides:
             target_fp_dtype = self.dtype
+
+            # A parent's constructor may replace or add a child's parameter after the child was
+            # partitioned, so _post_init_method never sees it. Mark it to take the Init dtype when it is
+            # converted later, like every parameter _post_init_method converts.
+            # The registration hook needs torch >= 2.5; without it we cannot mark such parameters and
+            # they keep the pre-hook behavior instead of crashing every Init(dtype=...) entry.
+            register_hook = getattr(torch.nn.modules.module, "register_module_parameter_registration_hook", None)
+            if register_hook is not None:
+
+                def remember_init_dtype(module, name, param):
+                    if param is not None and not is_zero_param(param) and param.is_floating_point():
+                        param._ds_zero_init_dtype = target_fp_dtype
+
+                self._replacement_hook = register_hook(remember_init_dtype)
+            else:
+                self._replacement_hook = None
         else:
             target_fp_dtype = None
         if DeepSpeedTensorOverride.device in self.tensor_overrides:
@@ -667,6 +683,8 @@ class InsertPostInitMethodToModuleSubClasses(object):
                                                              target_device=target_device)
 
     def _remove_tensor_creation_wrappers(self):
+        if DeepSpeedTensorOverride.dtype in self.tensor_overrides and self._replacement_hook is not None:
+            self._replacement_hook.remove()
         torch.Tensor.__new__ = torch.Tensor.__old_new__
         torch.tensor = _orig_torch_tensor
         torch.empty = _orig_torch_empty
@@ -997,7 +1015,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             enabled (bool, optional): If ``False``, this context has no
                 effect. Defaults to ``True``.
             dtype (``dtype``, optional): Can be used to change the data type of the parameters.
-                Supported options are ``torch.half`` and ``torch.float``. Defaults to ``None``
+                Floating-point tensor constructors without an explicit ``dtype`` use this type.
+                Supported options are ``torch.half``, ``torch.float16``, ``torch.float`` and
+                ``torch.bfloat16``. A parameter the context marked before conversion (for example one a
+                parent constructor added to an already-partitioned child) is converted to the marked Init
+                dtype, even when a later conversion passes a different explicit ``dtype``.
+                Defaults to ``None``
             mpu (``object``, optional): A model parallelism unit object that implements get_{model,data}_parallel_{rank,group,world_size}.
             zero_param_parallel_group(``object``, optional): Parallel (comm) group for dual partitioning of ZeRO params.
             zero_quantized_weights (bool, optional): If ``True``, turn on quantized weights in all gather weights. Default is ``False``
@@ -1170,10 +1193,13 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         else:
             self.param_swapper = None
 
-        # If we are provided an already-allocated module to prepare.
+        # If we are provided an already-allocated module to prepare. Honoring the recorded dtype here
+        # keeps a parameter the context marked (for example, a bias a parent constructor added to an
+        # already-partitioned child) consistent with the Init dtype even when this call runs before
+        # deepspeed.initialize converts the same model again.
         if module is not None:
             assert isinstance(module, torch.nn.Module)
-            self._convert_to_zero_parameters(module.parameters(recurse=True))
+            self._convert_to_zero_parameters(module.parameters(recurse=True), apply_init_dtype=True)
             self._keep_in_fp32(module)
 
         self.use_all_gather_into_tensor = dist.has_all_gather_into_tensor()
@@ -1200,13 +1226,15 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         else:
             dist.broadcast(view_as_uint8(param.data), dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
+        param.__dict__.pop("_ds_zero_init_dtype", None)
 
-    def _convert_to_zero_parameters(self, param_list):
+    def _convert_to_zero_parameters(self, param_list, apply_init_dtype=False):
         for param in param_list:
             if is_zero_param(param):
                 continue
 
-            param.data = param.data.to(self.local_device)
+            dtype = getattr(param, "_ds_zero_init_dtype", None) if apply_init_dtype else None
+            param.data = param.data.to(self.local_device, dtype=dtype)
             self._zero_init_param(param)
 
     def _validate_remote_device(self, remote_device, ds_config):
@@ -1235,6 +1263,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             if not is_zero_param(param):
                 if not get_accelerator().on_accelerator(param):
                     param.data = param.data.to(self.local_device)
+
+                # Constructors keep an explicit dtype, but ZeRO-3 flattens parameters into buffers of one dtype.
+                if (self.tensor_overrides and DeepSpeedTensorOverride.dtype in self.tensor_overrides
+                        and param.is_floating_point() and param.dtype != self.dtype):
+                    param.data = param.data.to(self.dtype)
 
                 if name == 'weight' and self.quantized_initialization and type(module) in WEIGHT_QUANTIZATION_LAYERS:
                     _quantize_param(param, self.quantized_initialization)
@@ -1669,7 +1702,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             }
 
         def convert_to_zero_parameters(param_list):
-            self._convert_to_zero_parameters(param_list)
+            self._convert_to_zero_parameters(param_list, apply_init_dtype=True)
 
         def allgather_before(func: Callable) -> Callable:
 

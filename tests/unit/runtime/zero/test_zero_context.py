@@ -210,6 +210,153 @@ class TestSerialContext(DistributedTest):
             y = torch.LongTensor([3, 3])
             assert y.dtype == torch.long
 
+    def test_explicit_tensor_dtype_is_preserved(self):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported")
+        setup_serial_env()
+
+        with deepspeed.zero.Init(dtype=torch.bfloat16):
+            inv_freq = 1.0 / (10_000.0**(torch.arange(0, 8, 2, dtype=torch.float32) / 8))
+            explicit_tensor_dtype = torch.Tensor(4, dtype=torch.float32)
+            default_tensor_dtype = torch.Tensor(4)
+            default_dtype = torch.zeros(4)
+
+        expected = (1.0 / (10_000.0**(torch.arange(0, 8, 2, dtype=torch.float32) / 8))).to(inv_freq.device)
+        assert inv_freq.dtype == torch.float32
+        assert torch.equal(inv_freq, expected)
+        assert explicit_tensor_dtype.dtype == torch.float32
+        assert default_tensor_dtype.dtype == torch.bfloat16
+        assert default_dtype.dtype == torch.bfloat16
+
+    def test_fp32_ctor_param_trains_under_bf16_config(self):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported")
+        setup_serial_env()
+
+        class ExplicitFp32Param(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4)
+                self.scale = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+
+            def forward(self, x):
+                return (self.linear(x) * self.scale).pow(2).mean()
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+            "zero_allow_untested_optimizer": True,
+            "gradient_clipping": 0,
+        }
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = ExplicitFp32Param()
+
+        # The param was created fp32 by the constructor; the context's ZeRO-3 partition
+        # flattens it to the Init dtype. Assert the stored partition dtype, not the view.
+        assert model.scale.ds_tensor.dtype == torch.bfloat16
+        assert model.linear.weight.ds_tensor.dtype == torch.bfloat16
+
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.5)
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        x = torch.randn(1, 4, device=engine.device, dtype=model.linear.weight.dtype)
+        loss = engine(x)
+        engine.backward(loss)
+        engine.step()
+        assert torch.isfinite(loss)
+
+    @pytest.mark.parametrize("bias", [True, False])
+    def test_replaced_child_weight_trains(self, bias):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported")
+        setup_serial_env()
+
+        class Model(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4, bias=bias)
+                self.linear.weight = torch.nn.Parameter(torch.ones(4, 4, dtype=torch.float32))
+
+            def forward(self, x):
+                adapter = torch.nn.functional.linear(x.to(self.adapter.dtype), self.adapter)
+                return (self.linear(x).float() + adapter).mean()
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+            "zero_allow_untested_optimizer": True,
+            "gradient_clipping": 0,
+        }
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = Model()
+        model.adapter = torch.nn.Parameter(torch.ones(4, 4, dtype=torch.float32))
+
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.5)
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        assert model.adapter.dtype == (torch.float32 if bias else torch.bfloat16)
+        loss = engine(torch.ones(1, 4, device=engine.device, dtype=torch.bfloat16))
+        engine.backward(loss)
+        engine.step()
+        with deepspeed.zero.GatheredParameters(model.linear.weight):
+            expected = torch.full((4, 4), 0.875, dtype=torch.bfloat16, device=engine.device)
+            torch.testing.assert_close(model.linear.weight, expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("init_module", [True, False])
+    def test_added_child_bias_trains(self, init_module):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported")
+        setup_serial_env()
+
+        class Model(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4, bias=False)
+                self.linear.bias = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+
+            def forward(self, x):
+                return self.linear(x).float().mean()
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+            "zero_allow_untested_optimizer": True,
+            "gradient_clipping": 0,
+        }
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = Model()
+
+        if init_module:
+            # Convert the already-partitioned model again before initialize. The bias added by the
+            # constructor keeps the Init dtype only if this conversion honors the recorded dtype.
+            deepspeed.zero.Init(module=model, config_dict_or_path=config_dict)
+
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.5)
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        loss = engine(torch.ones(1, 4, device=engine.device, dtype=torch.bfloat16))
+        engine.backward(loss)
+        engine.step()
+        # d(mean)/d(bias) is 1/4 for each of the 4 outputs, so one SGD step at lr=0.5 moves 1.0 to 0.875.
+        with deepspeed.zero.GatheredParameters(model.linear.bias):
+            expected = torch.full((4, ), 0.875, dtype=torch.bfloat16, device=engine.device)
+            torch.testing.assert_close(model.linear.bias, expected, rtol=0, atol=0)
+
     def test_throughput_calculation(self):
         setup_serial_env()
 
