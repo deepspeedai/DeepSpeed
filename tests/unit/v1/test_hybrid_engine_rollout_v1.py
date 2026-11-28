@@ -1252,6 +1252,42 @@ def test_static_graph_is_recaptured_after_a_peer_capture_failure(monkeypatch):
     assert output.input_ids.tolist() == expected.tolist()
 
 
+def test_static_graph_stops_once_every_row_has_produced_eos(monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    new_tokens = 48
+    request = _random_request(batch_size=8, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens, temperature=0)
+    unstopped = _rollout(model, use_graph_capture=False).generate(request, sampling).input_ids
+    # Every row's third generated token is an EOS id, so all rows finish early.
+    eos_ids = sorted(set(unstopped[:, 8 + 2].tolist()))
+
+    def rollout(use_graph_capture):
+        return HybridEngineRollout(SimpleNamespace(module=model),
+                                   SimpleNamespace(pad_token_id=0, eos_token_id=eos_ids),
+                                   cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph_capture))
+
+    expected = rollout(use_graph_capture=False).generate(request, sampling)
+    replay_count = 0
+    original_replay_graph = accelerator.replay_graph
+
+    def counted_replay_graph(graph):
+        nonlocal replay_count
+        replay_count += 1
+        return original_replay_graph(graph)
+
+    monkeypatch.setattr(accelerator, "replay_graph", counted_replay_graph)
+    output = rollout(use_graph_capture=True).generate(request, sampling)
+
+    assert output.input_ids.tolist() == expected.input_ids.tolist()
+    assert output.attention_mask.tolist() == expected.attention_mask.tolist()
+    assert replay_count < new_tokens - 1
+
+
 @pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 8), (False, 8)])
 @pytest.mark.parametrize("temperature, top_k, top_p", [(1.0, 0, 1.0), (0.7, 5, 1.0), (1.0, 0, 0.8)])
 def test_decode_sampling_matches_hf_generate(temperature, top_k, top_p, use_graph_capture, continuous_batch_size):
@@ -1459,3 +1495,44 @@ def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
     allocated = accelerator.memory_allocated()
     graph_rollout.shutdown()
     assert accelerator.memory_allocated() <= allocated - cache_bytes
+
+
+def test_graph_capture_falls_back_for_zero3_partitioned_weights(monkeypatch):
+    """ZeRO-3 gathers fresh parameter buffers each forward; a replayed graph would read
+    the stale buffers captured earlier. With use_graph_capture on, a partitioned-weights
+    engine must therefore take the eager path (which syncs ZeRO-3) and capture nothing."""
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+    device = torch.device(accelerator.device_name())
+
+    prompt_ids = torch.tensor([[1, 3, 4, 2], [3, 4, 5, 1]], device=device)
+    prompt_attn = torch.ones_like(prompt_ids)
+    new_tokens = 4
+
+    # Eager reference: prompt plus one deterministic token per step.
+    expected = torch.cat([prompt_ids, (prompt_ids.sum(dim=1, keepdim=True).remainder(29) + 3).repeat(1, new_tokens)],
+                         dim=1)
+
+    # If the graph path is (wrongly) taken, capture must fail so the test does.
+    def no_capture(*args, **kwargs):
+        raise RuntimeError("graph capture must not run on a ZeRO-3-partitioned engine")
+
+    monkeypatch.setattr(accelerator, "create_graph", no_capture)
+
+    # A ZeRO-3 engine reports partitioned weights; the eager path reads module.generate.
+    eager_calls = []
+
+    def fake_generate(prompt_ids, **kwargs):
+        eager_calls.append(kwargs)
+        return expected
+
+    engine = SimpleNamespace(module=SimpleNamespace(generate=fake_generate, config=object()),
+                             zero_optimization_partition_weights=lambda: True)
+    rollout = HybridEngineRollout(engine,
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    output = rollout.generate(RolloutRequest(prompt_ids, prompt_attn),
+                              SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+    assert eager_calls, "ZeRO-3 engine must fall back to the eager generation path"
+    assert torch.equal(output.input_ids, expected)
