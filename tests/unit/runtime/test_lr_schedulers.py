@@ -664,6 +664,26 @@ def test_warmup_schedulers_reject_invalid_warmup_num_steps(scheduler_cls, bad_wa
         scheduler_cls(**kwargs)
 
 
+@pytest.mark.parametrize("scheduler_cls", [WarmupLR, WarmupDecayLR, WarmupCosineLR])
+def test_warmup_schedulers_accept_zero_warmup_num_steps(scheduler_cls):
+    # HF Trainer fills "warmup_num_steps": "auto" with 0 when no warmup is set. Zero was
+    # accepted, and clamped to 2 like 1, before the positive-integer check was added.
+    lrs = {}
+    for warmup_num_steps in (0, 2):
+        param = torch.nn.Parameter(torch.zeros(1))
+        optimizer = torch.optim.SGD([param], lr=0.1)
+        kwargs = {"optimizer": optimizer, "warmup_num_steps": warmup_num_steps}
+        if scheduler_cls in (WarmupDecayLR, WarmupCosineLR):
+            kwargs["total_num_steps"] = 10
+        scheduler = scheduler_cls(**kwargs)
+        lrs[warmup_num_steps] = []
+        for _ in range(5):
+            scheduler.step()
+            lrs[warmup_num_steps].append(scheduler.get_last_lr()[0])
+
+    assert lrs[0] == lrs[2]
+
+
 def test_warmup_cosine_lr_unknown_warmup_type_falls_back_to_log():
     # WarmupLR warns and falls back to the log warmup curve for an unrecognized
     # warmup_type; WarmupCosineLR must do the same instead of crashing with an
