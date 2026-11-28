@@ -1601,10 +1601,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 # ensure that same list (with same ordering) of parameters are
                 # being allgathered across all ranks, otherwise could mix
                 # data between tensors.
-                assert_ints_same_as_other_ranks([p.ds_id for p in params])
+                assert_ints_same_as_other_ranks([p.ds_id for p in params], params[0].ds_process_group)
                 # ensure that tensors from each rank agree on the same ds_numel
                 # otherwise could mix data between tensors.
-                assert_ints_same_as_other_ranks([p.ds_tensor.ds_numel for p in params])
+                assert_ints_same_as_other_ranks([p.ds_tensor.ds_numel for p in params], params[0].ds_process_group)
 
             if self.allgather_sequential or len(params) == 1:
                 return _all_gather_sequential(params, world_size, use_secondary_tensor, ds_process_group, quantize)
