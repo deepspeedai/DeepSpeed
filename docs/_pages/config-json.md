@@ -213,7 +213,7 @@ Example of <i>**scheduler**</i>
 
 | Description                                                                                                                   | Default |
 | ----------------------------------------------------------------------------------------------------------------------------- | ------- |
-| During gradient averaging perform communication with selected data type. By default it will be determined by selected regime  |  None   |
+| During gradient averaging perform communication with selected data type. By default it will be determined by selected regime. For ZeRO stage 1 handled by `DeepSpeedZeroOptimizer` with a 16-bit model and `data_types.grad_accum_dtype: fp32`, the default is fp32 so the accumulated window sum is not rounded before the optimizer sees it. `BF16_Optimizer` (BF16 ZeRO stage 1 without optimizer offload), ZenFlow, and MoE models (whose expert-group reductions share this dtype) keep the regime default. An explicit value overrides this default; `bf16` restores the previous 16-bit reduction for that configuration. |  None   |
 
 <i>**gradient_allreduce_op**</i>: [string]
 
