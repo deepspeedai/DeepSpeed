@@ -13,10 +13,9 @@ name: cpu-torch-latest-v1-multirank
 # DS_MULTIRANK_ONLY drops single-rank tests, so a run spends its time on
 # world_size 2-4 CPU tests.
 #
-# Trigger rollout: manual dispatch only for now. Starting as a required
-# pull_request check would put an unvalidated ~1h suite in front of every PR;
-# once this run is green across a few real PRs, add `pull_request:` back to the
-# `on:` block and register the check with branch protection.
+# Trigger rollout: manual dispatch validated the suite on master, so it now
+# also runs on pull requests and in the merge queue; register the unit-tests
+# check with branch protection to make it required.
 
 on:
   workflow_dispatch:
@@ -49,6 +48,9 @@ on:
         required: false
         default: 'main'
         type: string
+  pull_request:
+  merge_group:
+    branches: [ master ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -276,6 +278,8 @@ jobs:
           HF_HUB_DISABLE_XET=1 HF_HOME=/tmp/hf_home hf download bert-base-uncased
 
       - name: Unit tests
+        env:
+          SELECTION_MODE: ${{ needs.collect-tests.outputs.mode }}
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
@@ -285,7 +289,19 @@ jobs:
             exit 0
           fi
           echo "Selected targets (${#targets[@]}): ${targets[*]}"
+          set +e
           HF_HOME=/tmp/hf_home \
             LOCAL_SIZE=4 \
             DS_MULTIRANK_ONLY=1 \
             pytest $PYTEST_OPTS --forked -n 4 "${targets[@]}" --torch_ver="$TORCH_TEST_VERSION"
+          pytest_exit=$?
+          set -e
+          # Only a subset selection can legitimately hold no multi-rank tests:
+          # DS_MULTIRANK_ONLY deselects the single-rank ones and pytest exits 5
+          # for "no tests ran". In mode=all the whole v1 scope is selected, so
+          # an empty run means the selector or the multi-rank gate broke.
+          if [ "$pytest_exit" -eq 5 ] && [ "$SELECTION_MODE" = "subset" ]; then
+            echo "No multi-rank tests in the selection; nothing to run."
+            exit 0
+          fi
+          exit "$pytest_exit"

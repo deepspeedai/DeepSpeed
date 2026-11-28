@@ -10,6 +10,7 @@ Helper functions and classes from multiple sources.
 
 from collections.abc import Iterable
 import os
+import sys
 import psutil
 import gc
 from math import isfinite, sqrt
@@ -205,7 +206,6 @@ def get_norm_with_moe_layers_fast(all_groups_norm, group):
     scaled_norm_tensor = torch.tensor(scaled_norm, device=get_accelerator().current_device_name(), dtype=torch.float)
     dist.all_reduce(scaled_norm_tensor, group=group)
     all_groups_norm = scaled_norm_tensor.item()
-    #print(f"old = {all_groups_norm_old} and new = {all_groups_norm} at rank: {deepspeed.comm.get_rank()}")
     return all_groups_norm
 
 
@@ -308,9 +308,6 @@ class CheckOverflow(object):
         # Since each model parallel GPU carries only part of the model,
         # make sure overflow flag is synced across all the model parallel GPUs
         overflow_gpu = get_accelerator().ByteTensor([overflow])
-        # deepspeed.comm.all_reduce(overflow_gpu,
-        #                             op=deepspeed.comm.ReduceOp.MAX,
-        #                             group=mpu.get_model_parallel_group())
         if has_moe_params:
             # All reduce this across expert_parallel_group, so that if an expert
             # overflows, we detect it here
@@ -356,7 +353,6 @@ def get_global_norm(norm_list):
     total_norm = 0.0
     for norm in norm_list:
         total_norm += norm**2.0
-    # logger.info(f'norm_list = {norm_list} global = {sqrt(total_norm)}')
     return sqrt(total_norm)
 
 
@@ -383,20 +379,81 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
-    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    parameters = list(parameters)
     norm_type = float(norm_type)
+
+    # Expert parameters are not replicated across the data parallel group, so the
+    # rank-averaging below cannot reconstruct a global norm from them: each rank's
+    # norm covers a different set of experts. Combine those the way the bf16 and
+    # fp16 optimizers already do, over the expert parallel group.
+    #
+    # Read ownership from the parameters, before dropping the ones with no gradient.
+    # The two branches below issue different collectives, so this decision has to
+    # come out the same on every rank -- and a rank whose experts received no tokens
+    # this step has expert parameters but no expert gradients.
+    # The registry of expert groups is built identically on every rank, so an empty one
+    # means no MoE is configured anywhere and the choice is already made: take the
+    # original path, with no collective and no host sync. This is a per-step call from
+    # `_take_model_step`, so the common case must not pay for the MoE one.
+    registry = sorted(getattr(groups, "_EXPERT_PARALLEL_GROUP", None) or {})
+    expert_group_names = []
+    if registry:
+        # A rank can legitimately own no expert at all -- under pipeline parallelism, a
+        # stage holding only dense layers -- so reading ownership locally cannot guarantee
+        # the same choice everywhere. One scalar settles it, and it has to be reduced over
+        # the world rather than the data parallel group: under pipeline parallelism that
+        # group is one stage wide (`PipelineParallelGrid.get_data_parallel_group`), while
+        # the expert norm below reduces over the pipeline group, which spans stages. A
+        # per-stage vote let an expert stage and a dense stage issue different collectives
+        # on that group. The second slot carries "an expert here has no group name", which
+        # has no expert parallel group to reduce over, so such a call stays on the
+        # original path rather than guessing which group the parameter belongs to.
+        vote = torch.tensor([
+            float(any(is_moe_param(p) and getattr(p, "group_name", None) is not None for p in parameters)),
+            float(any(is_moe_param(p) and getattr(p, "group_name", None) is None for p in parameters)),
+        ],
+                            device=get_accelerator().current_device_name(),
+                            dtype=torch.float)
+        dist.all_reduce(vote, group=groups._clone_world_group())
+        if vote[0].item() > 0 and vote[1].item() == 0:
+            expert_group_names = registry
+
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+
+    expert_tensors: Dict[str, List[torch.Tensor]] = {}
+    if expert_group_names:
+        # `get_norm_with_moe_layers` issues one collective per entry, so every rank has to
+        # walk the groups in the same order. Start from the registry's order rather than
+        # the order this rank's parameters happen to come in.
+        expert_tensors = {group_name: [] for group_name in expert_group_names}
+        for p in parameters:
+            if is_moe_param(p):
+                expert_tensors.setdefault(p.group_name, []).append(p.grad.data)
+        # Every rank has to reduce over every group, whether or not its own experts
+        # were used this step; a zero contributes nothing to the sum of p-th powers
+        # and nothing to a max over absolute values.
+        zero = torch.zeros(1, device=get_accelerator().current_device_name())
+        for tensors in expert_tensors.values():
+            if not tensors:
+                tensors.append(zero)
+
+    norm_parameters = [p for p in parameters if not is_moe_param(p)] if expert_tensors else parameters
+
     all_norms = []
     if norm_type == inf:
-        for p in parameters:
+        for p in norm_parameters:
             all_norms.append(p.grad.data.abs().max().float())
-        total_norm = torch.stack(all_norms).max()
+        # Everything may be an expert, leaving nothing replicated to take a max over.
+        # Zero is the identity here: these are absolute values.
+        total_norm = torch.stack(all_norms).max() if all_norms \
+            else torch.zeros((), device=get_accelerator().current_device_name())
         total_norm = total_norm.to(get_accelerator().current_device_name())
         # Take max across all GPUs.
         if mpu is not None:
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
     else:
         total_norm = 0
-        for p in parameters:
+        for p in norm_parameters:
             if mpu is not None:
                 if (mpu.get_model_parallel_rank() == 0) or is_model_parallel_parameter(p):
                     param_norm = p.grad.data.detach().float().norm(norm_type)
@@ -417,14 +474,26 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
         total_norm = total_norm.pow(1. / norm_type)
 
-    # Need to average total_norm across different GPUs due to the presence of moe params
-    pg = groups._get_data_parallel_group()
-    scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
-    scaled_norm_tensor = scaled_norm
+    if expert_tensors:
+        # `total_norm` now covers only the replicated parameters, so it is already the
+        # same on every rank. Fold the experts in over their own group, counting each
+        # expert once, rather than averaging norms that describe different parameters.
+        moe_norm = get_norm_with_moe_layers(total_norm, mpu=mpu, expert_tensors=expert_tensors, norm_type=norm_type)
+        # That helper reports a non-finite norm as -1. Left as-is it would make
+        # `clip_coef` negative and flip the sign of every gradient; inf keeps the
+        # behaviour the averaging path already had, which is to scale them to zero.
+        if moe_norm == -1:
+            moe_norm = float('inf')
+        total_norm = torch.tensor([float(moe_norm)], device=total_norm.device, dtype=torch.float)
+    else:
+        # Need to average total_norm across different GPUs due to the presence of moe params
+        pg = groups._get_data_parallel_group()
+        scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
+        scaled_norm_tensor = scaled_norm
 
-    dist.all_reduce(scaled_norm_tensor, group=pg)
-    total_norm = scaled_norm_tensor
-    total_norm = total_norm.to(parameters[0].device)
+        dist.all_reduce(scaled_norm_tensor, group=pg)
+        total_norm = scaled_norm_tensor
+        total_norm = total_norm.to(parameters[0].device)
 
     max_norm = torch.tensor([float(max_norm)], device=total_norm.device)
     clip_coef = max_norm / (total_norm + 1e-6)
@@ -913,6 +982,27 @@ def combine_grad_norm_groups(norm_groups, norm_type=2):
     return torch.where(invalid, torch.full_like(combined, float("inf")), combined)
 
 
+def _get_local_norm_contribution(input_tensors, norm_type, device):
+    """Compute the FP32 input to the global MAX or SUM reduction."""
+    all_norms = []
+    for tensor in input_tensors:
+        if norm_type == inf:
+            if tensor.numel() == 0:
+                continue
+            tensor_norm = tensor.detach().abs().max().float()
+        else:
+            tensor_norm = tensor.detach().float().norm(norm_type)
+        all_norms.append(tensor_norm.to(device))
+
+    if not all_norms and norm_type > 0:
+        return torch.zeros((), dtype=torch.float32, device=device)
+
+    local_norms = torch.stack(all_norms)
+    if norm_type == inf:
+        return local_norms.max()
+    return local_norms.pow(norm_type).sum()
+
+
 def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_group=None):
     """Get norm of an iterable of tensors.
 
@@ -928,50 +1018,28 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
         Total norm of the tensors (viewed as a single vector), as a detached float32 scalar tensor.
     """
     assert isinstance(input_tensors, Iterable), f'expected Iterable type not {type(input_tensors)}'
+    input_tensors = list(input_tensors)
     assert all([torch.is_tensor(t) for t in input_tensors]), 'expected list of only tensors'
 
     norm_type = float(norm_type)
-    all_norms = []
-    if norm_type == inf:
-        for t in input_tensors:
-            all_norms.append(t.data.abs().max().float())
-        total_norm = torch.stack(all_norms).max()
-        device_total_norm = total_norm.to(get_accelerator().current_device_name())
-        # Max across model parallel
-        if mpu is not None:
-            # For MoE grads, max over model parallel only if MoE-TP is enabled
-            if moe_ep_group is None or groups._get_expert_model_parallel_world_size() > 1:
-                dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
-            # If MoE grads and MoE-TP disabled, max over pipeline parallel
-            elif bwc_pipeline_parallel_world_size(mpu) > 1:
-                dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=bwc_pipeline_parallel_group(mpu))
+    device = get_accelerator().current_device_name()
+    return_device = input_tensors[0].device if input_tensors else device
+    device_total_norm = _get_local_norm_contribution(input_tensors, norm_type, device)
+    reduce_op = dist.ReduceOp.MAX if norm_type == inf else dist.ReduceOp.SUM
 
-        # MoE grads: max across expert parallel group
-        if pg_utils.is_parallel(moe_ep_group):
-            dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=moe_ep_group)
-        total_norm = device_total_norm.to(input_tensors[0].device)
-    else:
+    if mpu is not None:
+        # For MoE grads, reduce over model parallel only if MoE-TP is enabled.
+        if moe_ep_group is None or groups._get_expert_model_parallel_world_size() > 1:
+            dist.all_reduce(device_total_norm, op=reduce_op, group=mpu.get_model_parallel_group())
+        # If MoE grads and MoE-TP disabled, reduce over pipeline parallel.
+        elif bwc_pipeline_parallel_world_size(mpu) > 1:
+            dist.all_reduce(device_total_norm, op=reduce_op, group=bwc_pipeline_parallel_group(mpu))
 
-        device = get_accelerator().current_device_name()
-        for tensor in input_tensors:
-            tensor_norm = tensor.detach().float().norm(norm_type)
-            all_norms.append(tensor_norm.to(device))
-        norm_powers = torch.stack(all_norms).pow(norm_type)
-        device_total_norm = norm_powers.sum()
-
-        # Sum across model parallel
-        if mpu is not None:
-            # For MoE grads, sum over model parallel only if MoE-TP is enabled
-            if moe_ep_group is None or groups._get_expert_model_parallel_world_size() > 1:
-                dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
-            # If MoE grads and MoE-TP disabled, sum over pipeline parallel
-            elif bwc_pipeline_parallel_world_size(mpu) > 1:
-                dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=bwc_pipeline_parallel_group(mpu))
-
-        # MoE grads: sum across expert parallel group
-        if pg_utils.is_parallel(moe_ep_group):
-            dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=moe_ep_group)
-        total_norm = device_total_norm.to(input_tensors[0].device).pow(1. / norm_type)
+    if pg_utils.is_parallel(moe_ep_group):
+        dist.all_reduce(device_total_norm, op=reduce_op, group=moe_ep_group)
+    total_norm = device_total_norm.to(return_device)
+    if norm_type != inf:
+        total_norm = total_norm.pow(1. / norm_type)
 
     mask_nan_or_inf_with_val_inplace(total_norm, device=total_norm.device)
 
@@ -1195,7 +1263,15 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
 
 
 def is_transformers_cache(obj):
-    """Skip checks for the `transformers` cache class when performing AutoTP tensor comparisons."""
+    """Skip checks for the `transformers` cache class when performing AutoTP tensor comparisons.
+
+    DeepSpeedStaticCache follows that interface without subclassing it, and is a per-rank object too. Its module is
+    looked up rather than imported: an instance implies it is loaded, and importing it would make every AutoTP
+    input check depend on a rollout module whose annotations need Python 3.10.
+    """
+    static_cache = sys.modules.get("deepspeed.utils.static_cache")
+    if static_cache is not None and isinstance(obj, static_cache.DeepSpeedStaticCache):
+        return True
     try:
         from transformers.cache_utils import Cache
     except ImportError:

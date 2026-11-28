@@ -197,6 +197,10 @@ materialized. Liger supports one first-order backward per forward; retained-grap
 second backward and higher-order gradients raise an error rather than reusing
 its overwritten gradient buffer. Select `"torch"` for those workloads.
 
+To avoid materializing the local logits as well, select `"fused_linear"`, which
+fuses the head projection into the loss; see
+[Fused Projection and Loss](#fused-projection-and-loss).
+
 Only an `nn.Linear` whose final name segment is `lm_head` or `embed_out` is
 supported. With `vocab_parallel_lm_head: true`, if no such head exists,
 initialization fails instead of quietly falling back to an ordinary gathered
@@ -271,6 +275,38 @@ each shard's mean itself, weighted by the shard's valid-token count, so an
 additional SP reduction would double-count tokens. Pass an `sp_group` only when
 this loss is the sole aggregation over a manually constructed TP x SP mesh.
 
+### Untied Input Embedding
+
+`vocab_parallel_lm_head` shards an input embedding only when it is tied to the
+output head. An untied input embedding stays replicated on every TP rank (for
+example Qwen2.5-72B's 152,064 x 8,192 embedding weight is 12% of each GPU's
+parameters at TP 8). Set `vocab_parallel_embedding` to shard it along the
+vocabulary as well:
+
+```json
+"tensor_parallel": {
+    "autotp_size": 8,
+    "vocab_parallel_embedding": true
+}
+```
+
+Each rank keeps 1/tp of the rows, looks up the tokens that fall in its rows, and
+the partial results are summed over the tensor-parallel group. The model must
+return an `nn.Embedding` from `get_input_embeddings()`. The option applies on all
+three partitioning paths (HuggingFace `tp_plan`, `partition_config` or
+`preset_model`, and the heuristic path) and to models built under
+`deepspeed.zero.Init`.
+
+A tied embedding is sharded with its output head instead. When the head is
+vocabulary-parallel (`vocab_parallel_lm_head`) or row-parallel, the embedding
+already shares the head's shard and the option changes nothing. When the head
+stays replicated, the option raises an error rather than untie the embedding from
+its output head.
+
+The option also raises an error in two cases: when a `partition_config` spec
+already partitions the embedding, and when the DeepCompile `autotp` pass is
+enabled, because that pass does not support vocabulary-parallel embeddings.
+
 ### Fused Projection and Loss
 
 The vocabulary-parallel loss above still materializes `[tokens, vocab / tp]`
@@ -295,21 +331,85 @@ loss = vocab_parallel_linear_cross_entropy(hidden,
 
 The call replaces both `head(hidden)` and the loss: it all-reduces the hidden
 gradient over the TP group in backward, as the column-parallel head would. It
-supports `none`, `sum` and `mean` reductions. `chunk_size` (tokens per forward
-chunk; backward uses vocabulary blocks of the same size) trades peak memory for
-speed; by default each FP32 logits block is about the size of the hidden states.
-This API is not yet wired into the HuggingFace forward or
-the `vocab_parallel_lm_head` configuration.
+supports `none`, `sum` and `mean` reductions. Tokens whose target is
+`ignore_index` (prompt and padding positions) are dropped before the
+projection, so they cost neither GEMMs nor collectives. `chunk_size` (tokens per
+forward chunk; backward uses vocabulary blocks of the same size) trades peak
+memory for speed; by default each FP32 logits block is about the size of the
+hidden states, but at least 256 tokens so that the projection GEMMs stay efficient.
+
+#### Using the fused loss from a HuggingFace forward
+
+Set `vocab_parallel_ce_backend` to `"fused_linear"` to use this loss for the
+HuggingFace causal-LM forward:
+
+```json
+{
+    "bf16": { "enabled": true },
+    "zero_optimization": { "stage": 1 },
+    "tensor_parallel": {
+        "autotp_size": 2,
+        "vocab_parallel_lm_head": true,
+        "vocab_parallel_ce_backend": "fused_linear"
+    }
+}
+```
+
+When the model is called in training mode with `labels`, the vocabulary-parallel
+head hands its input to the installed `loss_function` instead of projecting it,
+and the loss runs the fused projection. `outputs.loss` is unchanged
+(`num_items_in_batch` is honored), but `outputs.logits` has a last dimension of
+0 because no logits are materialized. In eval mode, or without `labels`, the
+head returns the rank-local logits as with the `"torch"` backend.
+
+The HuggingFace `Trainer` needs no code changes: it reads
+`tensor_parallel.autotp_size` from the DeepSpeed config passed as
+`TrainingArguments(deepspeed=...)` and calls `deepspeed.tp_model_init` before
+`deepspeed.initialize`, so the vocabulary-parallel options above apply. For
+Qwen2.5-0.5B (151,936-token vocabulary, tied embeddings) with `Trainer`, TP=2,
+ZeRO-1, BF16, gradient checkpointing, 4 x 2,048 tokens per micro-batch with
+half of each sequence masked as prompt, on two GPUs:
+
+| `tensor_parallel` setting | Peak memory per rank | Step time (2x NVIDIA L20) | Step time (2x Intel Arc Pro B70) |
+| --- | --- | --- | --- |
+| `vocab_parallel_lm_head: false` (gathered logits) | 18,860 MiB | 558 ms | 715 ms |
+| `vocab_parallel_ce_backend: "torch"` | 13,201 MiB | 514 ms | 653 ms |
+| `vocab_parallel_ce_backend: "liger"` | 8,456 MiB | 477 ms | - |
+| `vocab_parallel_ce_backend: "fused_linear"` | 5,200 MiB | 467 ms | 590 ms |
+
+Peak memory is from the L20 runs; the B70 runs are within 20 MiB. Loss and
+gradient norms match across all settings.
+
+Limitations of the `"fused_linear"` backend:
+
+* Code that reads `outputs.logits` from a training forward with `labels`
+  receives an empty tensor. Compute such metrics in eval mode, or use the
+  `"torch"` backend.
+* Models that soft-cap or rescale the logits after the head (for example
+  `final_logit_softcapping`, `logit_scale` or `logits_scaling` in the config)
+  are rejected, because the fused loss never sees those logits.
+* ZeRO stage 3 and the DeepCompile AutoTP pass are rejected.
+* Under DeepSpeed Ulysses / ALST, the model is called with `shift_labels`
+  instead of `labels`, so the forward returns local logits and the
+  sequence-parallel loss path applies.
+
+With any vocabulary-parallel backend, `outputs.logits` (when present) holds only
+this rank's vocabulary shard. Callers that compute their own loss from the
+logits or from `lm_head.weight` therefore see partial vocabularies. This
+includes `Trainer` with `label_smoothing_factor`, and TRL trainers that patch
+the forward with their own fused LM head (`SFTTrainer` and `GRPOTrainer` since
+TRL 1.15). Use the vocabulary-parallel ops below, or keep
+`vocab_parallel_lm_head: false`, for those workloads.
 
 
-### Log-probabilities, Entropy, and KL on Sharded Logits
+### Log-probabilities, Entropy, KL, and JSD on Sharded Logits
 
 RL and on-policy distillation losses can consume the local logits shard
 directly through `deepspeed.sequence.vocab_parallel_ops`, so they never
 all-gather the full vocabulary:
 
 ```python
-from deepspeed.sequence.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_kl_div,
+from deepspeed.sequence.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_jsd, vocab_parallel_kl_div,
                                                    vocab_parallel_logprobs)
 
 head = model.lm_head  # VocabParallelLinear installed by vocab_parallel_lm_head
@@ -323,6 +423,9 @@ token_entropy = vocab_parallel_entropy(student_logits, **shard)
 
 # Dense distillation against an identically sharded teacher.
 token_kl = vocab_parallel_kl_div(student_logits, teacher_logits.detach(), reverse=True, **shard)
+
+# Generalized JSD over the full vocabulary, without gathering its shards.
+token_jsd = vocab_parallel_jsd(student_logits, teacher_logits.detach(), beta=0.5, **shard)
 
 # Distillation from a teacher that only provides top-k (logprob, id) pairs.
 student_topk = vocab_parallel_logprobs(student_logits, teacher_topk_ids, **ids)
@@ -339,16 +442,34 @@ default and `KL(student || teacher)` with `reverse=True`; apply any temperature
 to both logits before calling. Teacher and student logits must use the same TP
 group and vocabulary sharding.
 
+`vocab_parallel_jsd` computes `(1-beta) * KL(student || mixture) + beta * KL(teacher || mixture)`,
+where `mixture = (1-beta) * student + beta * teacher` refers to globally normalized probabilities.
+For compatibility with `generalized_jsd_loss`, `beta=0` instead selects forward KL and `beta=1`
+selects reverse KL; these endpoint conventions are not the continuous limits of the interior
+JSD expression. Gradients flow to both models unless the teacher logits are detached.
+Temperature is applied to the input logits by the caller; no temperature-squared factor is
+added automatically. Top-k restriction and pointwise clipping are not supported.
+
 Each op saves only its inputs and per-token statistics, and recomputes the
 softmax in bounded row chunks during backward. Its peak activation memory is
 therefore a small multiple of the local logits shard instead of the several
 fp32 copies that an equivalent composition of PyTorch ops keeps alive.
-When Triton supports the logits' device, each pass over the logits runs in a
-fused Triton kernel that keeps no fp32 copy of the shard; other devices, or
+When Triton supports the logits' device,
+each pass over the logits runs in a fused Triton kernel that keeps no fp32 copy of the shard; other devices, or
 `deepspeed.HAS_TRITON = False`, use an eager implementation with the same
 semantics. The entropy and KL forward passes read each logit once, and a slice
 along the sequence, such as the next-token shift `logits[:, :-1]`, is read in
 place rather than copied.
+Interior-beta JSD has fused Triton statistics, divergence and backward kernels, with
+bounded eager row chunks as fallback. Its statistics kernel reads student and teacher
+together; after global normalization a second pass computes both KL-to-mixture
+expectations, packed into one SUM all-reduce. Unlike KL, the nonlinear mixture requires
+this second forward pass. Backward recomputes probabilities in registers and writes
+only the requested gradients, without extra TP communication.
+JSD also enables these kernels on XPU when an active Intel Triton backend is installed,
+without changing the accelerator-wide Triton flag or the dispatch of existing ops.
+It still consumes materialized local logits; this is not fused-linear JSD and does not
+automatically integrate with TRL or the OPSD example.
 
 ## Custom Patterns
 
@@ -442,6 +563,8 @@ For Grouped Query Attention with different Q/K/V sizes:
 3. **Combined TP and SP orchestration**: The vocab-parallel loss supports explicit orthogonal TP and SP groups, but AutoTP does not currently construct a combined TP x SP process mesh automatically.
 
 4. **Cross-topology universal restore**: Loading a universal checkpoint back into a topology with a *different* tensor-parallel degree goes through DeepSpeed's Megatron-style model-state loader, which is not AutoTP-aware; prefer same-topology restore when changing world size.
+
+5. **One tensor-parallel layout per process**: The TP and DP groups are process-wide, and the first engine creates them. A later engine in the same process must use the same `autotp_size`; `deepspeed.initialize` raises an error if it asks for a different one, including an engine without AutoTP that does not pass its own `mpu` and would therefore inherit an earlier AutoTP engine's groups. If an engine in between passed its own `mpu`, a later engine without one inherits that `mpu` instead. Per-engine groups are tracked in [#9081](https://github.com/deepspeedai/DeepSpeed/issues/9081).
 
 
 ## See Also

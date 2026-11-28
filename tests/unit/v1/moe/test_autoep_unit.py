@@ -51,6 +51,7 @@ from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
+from deepspeed.moe.routing_replay import RoutingReplay
 from deepspeed.compile.config import CompileConfig
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.engine import DeepSpeedEngine
@@ -348,14 +349,62 @@ class TestAutoEPConfig:
         })
         validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
 
-    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+    def test_skip_recompute_combine_defaults_off_and_requires_the_deepep_route(self):
+        assert parse_autoep_config({}).skip_recompute_combine is False
+        deepep = {"comm_backend": "deepep", "comm_max_tokens_per_rank": 4096}
+        rejected = (
+            ({
+                "autoep_size": 2,
+                "skip_recompute_combine": "true"
+            }, "skip_recompute_combine must be a boolean"),
+            ({
+                "autoep_size": 2,
+                "skip_recompute_combine": True
+            }, 'comm_backend="comm"'),
+            ({
+                "autoep_size": 1,
+                "skip_recompute_combine": True,
+                **deepep
+            }, "autoep_size=1"),
+        )
+        for overrides, match in rejected:
+            config = parse_autoep_config({"enabled": True, **overrides})
+            with pytest.raises(ValueError, match=match):
+                validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "skip_recompute_combine": True, **deepep})
+        assert config.skip_recompute_combine is True
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    @pytest.mark.parametrize("preset_model", [None, "mixtral"], ids=["automatic-preset", "explicit-preset"])
+    @pytest.mark.parametrize("pattern", [r"custom\.wrapper\.moe", r"model\.layers\.\d+\.block_sparse_moe", ""],
+                             ids=["custom-parent", "preset-pattern", "empty-pattern"])
+    def test_skip_recompute_combine_rejects_pattern_overrides_even_with_supported_presets(self, preset_model, pattern):
+        settings = {
+            "enabled": True,
+            "autoep_size": 2,
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+            "preset_model": preset_model,
+            "moe_layer_pattern": pattern,
+        }
+        config = parse_autoep_config({**settings, "skip_recompute_combine": True})
+        with pytest.raises(ValueError, match="skip_recompute_combine.*moe_layer_pattern"):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+        config = parse_autoep_config({**settings, "skip_recompute_combine": False})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+        config = parse_autoep_config({**settings, "skip_recompute_combine": True, "moe_layer_pattern": None})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_accepts_folded_tensor_parallelism(self):
         config = parse_autoep_config({
             "enabled": True,
             "autoep_size": 2,
             "combine_impl": "fused_weighted_sum",
         })
-        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
-            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        assert config.combine_impl == "fused_weighted_sum"
 
     def test_fused_combine_rejects_expert_tensor_parallelism(self):
         config = parse_autoep_config({
@@ -423,6 +472,11 @@ class TestAutoEPConfig:
         with pytest.raises(ValueError, match="exceeds num_experts"):
             validate_autoep_post_detection(AutoEPConfig(enabled=True, autoep_size=16), [_make_spec(num_experts=8)])
 
+    def test_grouped_routing_rejects_top_k_beyond_selected_groups(self):
+        spec = _make_spec(num_experts=8, top_k=3, num_expert_groups=4, num_limited_groups=1)
+        with pytest.raises(ValueError, match="experts available"):
+            validate_autoep_post_detection(AutoEPConfig(enabled=True, autoep_size=1), [spec])
+
     def test_expert_tensor_parallel_size_is_parsed_but_limited_to_one(self):
         config = parse_autoep_config({
             "enabled": True,
@@ -455,12 +509,13 @@ class TestAutoEPConfig:
 
         observed = {}
 
-        def record_validate(config, world_size, pp_size, tp_size, sp_size):
+        def record_validate(config, world_size, pp_size, tp_size, sp_size, zero_stage=None):
             observed["validate"] = {
                 "world_size": world_size,
                 "pp_size": pp_size,
                 "tp_size": tp_size,
                 "sp_size": sp_size,
+                "zero_stage": zero_stage,
             }
 
         def record_create(**kwargs):
@@ -489,6 +544,7 @@ class TestAutoEPConfig:
 
         assert groups.mpu is None
         assert observed["validate"]["sp_size"] == 2
+        assert observed["validate"]["zero_stage"] == 0
         assert observed["create"]["mp_size"] == 2
         assert observed["create"]["mp_mode"] == "sp"
 
@@ -891,6 +947,7 @@ class TestAutoEPConfig:
         optimizer.gradient_accumulation_dtype = torch.float32
         optimizer.postscale_gradients = True
         optimizer.gradient_predivide_factor = 1.0
+        optimizer.sequence_parallel_size = 1
         optimizer.all2all_process_group = None
         optimizer._assert_same_partition_group = lambda _: None
         optimizer._get_param_partition_group = lambda _: "expert_data_parallel"
@@ -922,6 +979,7 @@ class TestAutoEPConfig:
         optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
         optimizer.dp_process_group = "global_data_parallel"
         optimizer.ipg_buckets = {torch.float32: SimpleNamespace(params=[], process_group="expert_data_parallel")}
+        optimizer.dtype = torch.float32
         optimizer.postscale_gradients = True
         optimizer.gradient_predivide_factor = 1.0
         optimizer.sequence_parallel_size = 1
@@ -1054,7 +1112,8 @@ class TestAutoEPConfig:
             "model.layers.0.mlp.experts.w2",
             "model.layers.0.mlp.experts.w3",
         }
-        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[0])
+        # Keyed by (tensor-parallel rank, data-parallel rank), read from zero_pp_rank_{dp}_mp_rank_{tp}.
+        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[(0, 0)])
 
     def test_universal_stage3_extract_accepts_tuple_param_shapes(self, tmp_path):
         from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
@@ -1451,6 +1510,159 @@ class TestAutoEPRegionalCompile:
 
 class TestRoutingAndLayerSemantics:
 
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_router_replay_keeps_route_ids_and_router_gradients(self, device, monkeypatch):
+        if device == "cuda":
+            from deepspeed.accelerator import get_accelerator
+
+            if get_accelerator().device_name() != "cuda" or not get_accelerator().is_available():
+                pytest.skip("CUDA routing replay requires a CUDA accelerator")
+        router = TokenChoiceTopKRouter(8, 4, None, None, 2, "softmax", True, 1.0, False).to(device)
+        replay = RoutingReplay()
+        router.set_routing_replay(replay, "layer.0")
+        inputs = torch.randn(6, 8, device=device, requires_grad=True)
+
+        with replay.recording():
+            _, recorded_experts, _ = router(inputs)
+
+        with torch.no_grad():
+            router.gate.weight.zero_()
+
+        def unexpected_topk(*args, **kwargs):
+            raise AssertionError("replay should not recompute top-k")
+
+        monkeypatch.setattr(torch, "topk", unexpected_topk)
+        with replay.replaying():
+            replayed_scores, replayed_experts, _ = router(inputs)
+
+        torch.testing.assert_close(replayed_experts, recorded_experts)
+        expected_scores = router.gate(inputs).softmax(dim=-1).gather(1, recorded_experts)
+        expected_scores = expected_scores / expected_scores.sum(dim=-1, keepdim=True)
+        torch.testing.assert_close(replayed_scores, expected_scores)
+        assert replayed_scores.requires_grad
+        replayed_scores[:, 0].sum().backward()
+        assert router.gate.weight.grad is not None
+
+    def test_router_replay_validates_external_routes(self):
+        router = TokenChoiceTopKRouter(8, 4, None, None, 2, "softmax", False, 1.0, False)
+        replay = RoutingReplay()
+        router.set_routing_replay(replay, "layer.0")
+        inputs = torch.randn(3, 8)
+
+        external_routes = torch.tensor([[0, 1], [2, 3], [0, 2]], dtype=torch.int16)
+        replay.set_replay_data("layer.0", external_routes)
+        external_routes[0, 0] = 3
+        with replay.replaying():
+            _, selected, _ = router(inputs)
+        expected = torch.tensor([[0, 1], [2, 3], [0, 2]])
+        torch.testing.assert_close(selected, expected)
+
+        with pytest.raises(TypeError, match="integer dtype"):
+            replay.set_replay_data("layer.0", torch.randn(3, 2))
+
+        replay.set_replay_data("layer.0", torch.tensor([[0, 1], [2, 3]], dtype=torch.int16))
+        with pytest.raises(ValueError, match=r"expected \(3, 2\)"):
+            with replay.replaying():
+                router(inputs)
+        with replay.replaying():
+            _, selected, _ = router(inputs[:2])
+        torch.testing.assert_close(selected, torch.tensor([[0, 1], [2, 3]]))
+
+        replay.set_replay_data("layer.0", torch.tensor([[0, 0], [1, 2], [2, 3]]))
+        with pytest.raises(ValueError, match="duplicate experts"):
+            with replay.replaying():
+                router(inputs)
+
+        replay.set_replay_data("layer.0", torch.tensor([[0, 4], [1, 2], [2, 3]]))
+        with pytest.raises(ValueError, match="outside"):
+            with replay.replaying():
+                router(inputs)
+
+        recorded_replay = RoutingReplay()
+        recorded_router = TokenChoiceTopKRouter(8, 4, None, None, 2, "softmax", False, 1.0, False)
+        recorded_router.set_routing_replay(recorded_replay, "layer.0")
+        recorded_inputs = torch.randn(2, 8)
+        with recorded_replay.recording():
+            _, recorded_routes, _ = recorded_router(recorded_inputs)
+        expected_recorded_routes = recorded_routes.clone()
+        recorded_routes[0, 0] = (recorded_routes[0, 0] + 1) % 4
+        with recorded_replay.replaying():
+            _, selected, _ = recorded_router(recorded_inputs)
+        torch.testing.assert_close(selected, expected_recorded_routes)
+
+    @pytest.mark.parametrize("checkpoint_mode", [False, True])
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_autoep_router_replay_matches_checkpoint_gradients(self, checkpoint_mode, device, monkeypatch):
+        if device == "cuda":
+            from deepspeed.accelerator import get_accelerator
+
+            if get_accelerator().device_name() != "cuda" or not get_accelerator().is_available():
+                pytest.skip("CUDA checkpoint replay requires a CUDA accelerator")
+
+        torch.manual_seed(1234)
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec()
+        config = _runtime_config(enabled=True, autoep_size=1)
+        reference = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        candidate = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        replay = RoutingReplay()
+        candidate.router.set_routing_replay(replay, "layer.0")
+        inputs = torch.randn(4, 8, 64, device=device)
+
+        reference_inputs = inputs.detach().clone().requires_grad_(True)
+        reference_output = reference(reference_inputs)
+        reference_output.square().mean().backward()
+        assert reference.router.gate.weight.grad is not None
+
+        candidate_inputs = inputs.detach().clone().requires_grad_(True)
+        with replay.recording():
+            candidate_output = checkpoint(candidate, candidate_inputs, use_reentrant=checkpoint_mode)
+
+        def unexpected_topk(*args, **kwargs):
+            raise AssertionError("checkpoint replay must not recompute top-k")
+
+        monkeypatch.setattr(torch, "topk", unexpected_topk)
+        with replay.replaying():
+            candidate_output.square().mean().backward()
+
+        torch.testing.assert_close(candidate_output, reference_output, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(candidate_inputs.grad, reference_inputs.grad, rtol=1e-5, atol=1e-6)
+        reference_parameters = dict(reference.named_parameters())
+        for name, parameter in candidate.named_parameters():
+            expected = reference_parameters[name]
+            assert (parameter.grad is None) == (expected.grad is None), name
+            if parameter.grad is not None:
+                torch.testing.assert_close(parameter.grad, expected.grad, rtol=1e-5, atol=1e-6)
+
+    @pytest.mark.parametrize("kwargs, message", [
+        ({
+            "top_k": 0
+        }, "positive integer"),
+        ({
+            "top_k": 9
+        }, "must not exceed"),
+        ({
+            "top_k": 3,
+            "num_expert_groups": 4,
+            "num_limited_groups": 1
+        }, "available"),
+        ({
+            "top_k": 2,
+            "num_limited_groups": 1
+        }, "requires"),
+    ])
+    def test_router_rejects_invalid_grouped_top_k(self, kwargs, message):
+        params = {"num_expert_groups": None, "num_limited_groups": None, "top_k": 2}
+        params.update(kwargs)
+        with pytest.raises(ValueError, match=message):
+            TokenChoiceTopKRouter(64,
+                                  8,
+                                  gate_bias=False,
+                                  score_func="softmax",
+                                  route_norm=True,
+                                  route_scale=1.0,
+                                  **params)
+
     def test_router_route_scale_and_group_limited_routing(self):
         base = TokenChoiceTopKRouter(64, 8, 4, 2, 2, "softmax", False, 1.0, False)
         scaled = TokenChoiceTopKRouter(64, 8, 4, 2, 2, "softmax", False, 2.5, False)
@@ -1464,6 +1676,20 @@ class TestRoutingAndLayerSemantics:
         assert torch.allclose(scaled_scores, base_scores * 2.5, atol=1e-5)
         assert torch.equal(scaled_counts, base_counts)
         assert base_counts.shape == (8, )
+
+    def test_router_computes_an_fp32_gate_in_fp32(self):
+        """A model may keep the gate weight in fp32 while the rest trains in bf16 (transformers lists GLM-4-MoE's
+        gate.weight in _keep_in_fp32_modules_strict). The router takes the bf16 hidden states and computes the logits
+        in fp32, as Hugging Face's router does."""
+        router = TokenChoiceTopKRouter(64, 8, None, None, 2, "sigmoid", False, 1.0, False)
+        hidden_states = torch.randn(50, 64).bfloat16()
+
+        scores, experts, counts = router(hidden_states)
+        reference_scores, reference_experts, reference_counts = router(hidden_states.float())
+
+        assert torch.equal(experts, reference_experts)
+        assert torch.equal(scores, reference_scores)
+        assert torch.equal(counts, reference_counts)
 
     def test_grouped_experts(self):
         experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)
@@ -1508,6 +1734,14 @@ class TestRoutingAndLayerSemantics:
                            ep_size=1,
                            ep_rank=0,
                            config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
+
+    def test_skip_recompute_combine_is_limited_to_checked_presets(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        config = _runtime_config(enabled=True, autoep_size=1, skip_recompute_combine=True)
+        with pytest.raises(ValueError, match="skip_recompute_combine is not supported for preset 'custom_family'"):
+            AutoEPMoELayer(_make_spec(model_family="custom_family"), source, ep_size=1, ep_rank=0, config=config)
+        layer = AutoEPMoELayer(_make_spec(), source, ep_size=1, ep_rank=0, config=config)
+        assert layer.skip_recompute_combine is True
 
     def test_router_cache_does_not_duplicate_model_level_gate_capture(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
@@ -2065,6 +2299,19 @@ class TestModelDetectionAndReplacement:
         assert isinstance(model.model.layers[0].mlp, AutoEPMoELayer)
         assert model(torch.randn(1, 4, 64)).shape == (1, 4, 100)
 
+    def test_skip_recompute_combine_attaches_each_layer_to_its_decoder_layer(self):
+        for skip in (False, True):
+            model = MockMoETransformer(num_layers=2, moe_every_n=1)
+            config = _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral", skip_recompute_combine=skip)
+            auto_ep = AutoEP(model, config)
+            for spec in auto_ep.ep_parser():
+                auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+            for decoder_layer in model.model.layers:
+                attached = decoder_layer.mlp._decoder_layer
+                # Held weakly, so the decoder layer is not registered as a child of its own MoE layer.
+                assert (attached() if skip else attached) is (decoder_layer if skip else None)
+                assert all(module is not decoder_layer for module in decoder_layer.mlp.modules())
+
     def test_fused_replacement_preserves_frozen_experts_and_trainable_router(self):
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1).to(dtype=torch.bfloat16)
         source = model.model.layers[0].mlp
@@ -2406,6 +2653,44 @@ def _eager_pep604_lines(module):
                 if isinstance(sub_node, ast.BinOp) and isinstance(sub_node.op, ast.BitOr):
                     offending_lines.append(sub_node.lineno)
     return sorted(set(offending_lines))
+
+
+class _ModelKeyedRegistry(dict):
+    """Like transformers' newer _CAN_RECORD_REGISTRY: keyed by str(model class), with get() and __setitem__() that
+    take a model."""
+
+    def __setitem__(self, model, can_record_outputs):
+        super().__setitem__(str(model.__class__), can_record_outputs)
+
+    def get(self, model):
+        return super().get(str(model.__class__)) or {}
+
+
+class TestTransformersOutputRecorderRegistry:
+
+    @pytest.mark.parametrize("registry_type", [dict, _ModelKeyedRegistry], ids=["plain_dict", "model_keyed"])
+    def test_install_uses_and_restores_entries_by_class_key(self, registry_type):
+        import deepspeed.module_inject.auto_ep_presets.base as presets_base
+
+        model = nn.Sequential(nn.Linear(2, 2))
+        model_key, layer_key = str(model.__class__), str(model[0].__class__)
+        registry = registry_type()
+        dict.__setitem__(registry, model_key, {"router_logits": "original"})
+        seen_while_installing = {}
+
+        def maybe_install_capturing_hooks(installed_model):
+            seen_while_installing.update(dict(registry))
+
+        output_capturing = SimpleNamespace(_CAN_RECORD_REGISTRY=registry,
+                                           maybe_install_capturing_hooks=maybe_install_capturing_hooks)
+        entries = {model_key: {"router_logits": "retargeted"}, layer_key: {"router_logits": "added"}}
+        installed = presets_base._install_instance_transformers_output_recorders(model, entries, output_capturing,
+                                                                                 lambda module: 0)
+
+        assert installed
+        assert seen_while_installing == entries
+        # The original entry is back under its class key, and the added one is gone.
+        assert dict(registry) == {model_key: {"router_logits": "original"}}
 
 
 class TestPy39AnnotationSafety:

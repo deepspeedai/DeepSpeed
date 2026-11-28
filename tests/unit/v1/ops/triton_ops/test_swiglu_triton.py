@@ -28,11 +28,13 @@ import torch.nn.functional as F
 
 @pytest.fixture(autouse=True)
 def _load_swiglu_in_the_worker():
-    global get_accelerator, swiglu, swiglu_packed, swiglu_clamped, swiglu_clamped_packed
+    global get_accelerator, swiglu, swiglu_packed, swiglu_backward, swiglu_packed_backward
+    global swiglu_clamped, swiglu_clamped_packed
     # The shared Triton availability probe initializes its driver, so it must run after pytest forks its worker.
     from deepspeed.accelerator import get_accelerator
     from deepspeed.ops.triton_ops import is_triton_available
-    from deepspeed.ops.triton_ops.swiglu_triton import swiglu, swiglu_packed, swiglu_clamped, swiglu_clamped_packed
+    from deepspeed.ops.triton_ops.swiglu_triton import (swiglu, swiglu_packed, swiglu_backward, swiglu_packed_backward,
+                                                        swiglu_clamped, swiglu_clamped_packed)
 
     if not is_triton_available():
         pytest.skip("Triton is not available")
@@ -135,6 +137,44 @@ def test_packed_matches_the_separate_kernel_exactly(dtype, shape):
     out.backward(grad_out)
     expected.backward(grad_out)
     torch.testing.assert_close(gate_up.grad, torch.cat([gate.grad, up.grad], dim=-1), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_standalone_backward_matches_autograd_exactly(dtype):
+    # Callers that run the forward inside their own autograd function differentiate it with these.
+    dev = get_accelerator().current_device_name()
+    gate = torch.randn(7, 384, device=dev, dtype=dtype, requires_grad=True)
+    up = torch.randn(7, 384, device=dev, dtype=dtype, requires_grad=True)
+    gate_up = torch.cat([gate, up], dim=-1).detach().requires_grad_(True)
+    grad_out = torch.randn(7, 384, device=dev, dtype=dtype)
+    swiglu(gate, up).backward(grad_out)
+    swiglu_packed(gate_up).backward(grad_out)
+
+    grad_gate, grad_up = swiglu_backward(grad_out, gate.detach(), up.detach())
+    torch.testing.assert_close(grad_gate, gate.grad, rtol=0, atol=0)
+    torch.testing.assert_close(grad_up, up.grad, rtol=0, atol=0)
+    torch.testing.assert_close(swiglu_packed_backward(grad_out, gate_up.detach()), gate_up.grad, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_standalone_backwards_select_the_input_device(dtype):
+    accelerator = get_accelerator()
+    if accelerator.device_count() < 2:
+        pytest.skip("standalone cross-device backward needs two CUDA devices")
+    with torch.cuda.device(1):  #ignore-cuda
+        gate = torch.ones((7, 13), device=accelerator.current_device_name(), dtype=dtype, requires_grad=True)
+        up = torch.full_like(gate, 0.5, requires_grad=True)
+        packed = torch.cat((gate, up), dim=-1).detach().requires_grad_(True)
+        upstream = torch.ones_like(gate)
+        swiglu(gate, up).backward(upstream)
+        swiglu_packed(packed).backward(upstream)
+    with torch.cuda.device(0):  #ignore-cuda
+        grad_gate, grad_up = swiglu_backward(upstream, gate.detach(), up.detach())
+        grad_packed = swiglu_packed_backward(upstream, packed.detach())
+        assert accelerator.current_device() == 0
+    torch.testing.assert_close(grad_gate, gate.grad, rtol=0, atol=0)
+    torch.testing.assert_close(grad_up, up.grad, rtol=0, atol=0)
+    torch.testing.assert_close(grad_packed, packed.grad, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])

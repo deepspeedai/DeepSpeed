@@ -61,8 +61,9 @@ tests/unit/saved_checkpoint/
 *_hip.cpp
 *_hip.h
 *.hip
-*.cuh
 *hip_layers.h
+*_hip.cuh
+deepspeed/inference/v2/kernels/core_ops/hip_*/
 
 # virtual env directory for format
 venv

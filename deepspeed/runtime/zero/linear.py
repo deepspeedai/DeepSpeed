@@ -60,8 +60,11 @@ autocast_custom_fwd, autocast_custom_bwd = _get_autocast_decorators()
 def _is_autocast_enabled(device_type):
     try:
         return torch.is_autocast_enabled(device_type)
-    except TypeError:
-        legacy_getter = getattr(torch, f'is_autocast_{device_type}_enabled', None)
+    except (AttributeError, TypeError):
+        legacy_names = (("is_autocast_cuda_enabled", "is_autocast_gpu_enabled") if device_type == "cuda" else
+                        (f"is_autocast_{device_type}_enabled", ))
+        legacy_getter = next(
+            (getattr(torch, name, None) for name in legacy_names if getattr(torch, name, None) is not None), None)
         if legacy_getter is not None:
             return legacy_getter()
         return torch.is_autocast_enabled()
@@ -70,11 +73,24 @@ def _is_autocast_enabled(device_type):
 def _get_autocast_dtype(device_type):
     try:
         return torch.get_autocast_dtype(device_type)
-    except TypeError:
-        legacy_getter = getattr(torch, f'get_autocast_{device_type}_dtype', None)
+    except (AttributeError, TypeError):
+        legacy_names = (("get_autocast_gpu_dtype", "get_autocast_cuda_dtype") if device_type == "cuda" else
+                        (f"get_autocast_{device_type}_dtype", ))
+        legacy_getter = next(
+            (getattr(torch, name, None) for name in legacy_names if getattr(torch, name, None) is not None), None)
         if legacy_getter is not None:
             return legacy_getter()
         return None
+
+
+def _get_autocast_device_type(tensor):
+    # Autocast state is per device type and only applies to ops on tensors of that type, so it
+    # must follow the operands (e.g. CPU autocast on a CUDA machine), not the accelerator.
+    device_type = tensor.device.type
+    is_autocast_available = getattr(torch.amp, 'is_autocast_available', None)
+    if is_autocast_available is not None and not is_autocast_available(device_type):
+        return get_accelerator().device_name()
+    return device_type
 
 
 class LinearFunctionForZeroStage3(torch.autograd.Function):
@@ -98,7 +114,8 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        device_type = get_accelerator().device_name()
+        device_type = _get_autocast_device_type(inputs[0])
+        ctx._autocast_device_type = device_type
         ctx._dtype = _get_autocast_dtype(device_type)
         ctx._fwd_used_autocast = _is_autocast_enabled(device_type)
         input, weight, bias = inputs[0], inputs[1], inputs[2] if len(inputs) > 2 else None
@@ -110,8 +127,7 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
         # Match @custom_bwd semantics: always run backward under the same
         # autocast state as forward — including explicitly disabling autocast
         # when forward did not use it, to guard against outer autocast regions.
-        device_type = get_accelerator().device_name()
-        with torch.autocast(device_type=device_type, enabled=ctx._fwd_used_autocast, dtype=ctx._dtype):
+        with torch.autocast(device_type=ctx._autocast_device_type, enabled=ctx._fwd_used_autocast, dtype=ctx._dtype):
             input, weight, bias = ctx.saved_tensors
 
             grad_input = grad_weight = grad_bias = None

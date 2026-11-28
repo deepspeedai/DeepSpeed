@@ -61,10 +61,17 @@ io_op_desc_t::io_op_desc_t(const bool read_op,
       _file_offset(file_offset),
       _intra_op_parallelism(intra_op_parallelism),
       _num_bytes_per_thread(static_cast<int64_t>(buffer.nbytes()) / intra_op_parallelism),
-      _validate(validate)
+      _validate(validate),
+      _error_code(0)
 {
     if (validate) { assert(nullptr != filename); }
     if (!read_op) { warn_consumer_ssd_writes(); }
+}
+
+void io_op_desc_t::set_error(const int error_code)
+{
+    int no_error = 0;
+    _error_code.compare_exchange_strong(no_error, error_code);
 }
 
 char* io_op_desc_t::data_ptr() const { return (char*)_contiguous_buffer.data_ptr(); }

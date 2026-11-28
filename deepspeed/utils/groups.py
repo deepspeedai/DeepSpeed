@@ -204,6 +204,26 @@ def _init_tp_groups_with_new_group(tensor_model_parallel_size=1, data_parallel_s
     return _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
 
 
+def _check_existing_tp_groups(tensor_model_parallel_size):
+    """Raise if the process-wide TP groups do not have the requested size.
+
+    These groups are shared by every engine in the process, and the first engine to create them wins.
+    A later engine that asks for another layout would otherwise run on the earlier engine's groups
+    without any error.
+    """
+    if _TENSOR_MODEL_PARALLEL_GROUP is None:
+        return
+    existing_tp_size = dist.get_world_size(group=_TENSOR_MODEL_PARALLEL_GROUP)
+    if existing_tp_size == tensor_model_parallel_size:
+        return
+    raise RuntimeError(
+        f"A tensor parallel size {tensor_model_parallel_size} was requested, but this process already has "
+        f"tensor parallel groups of size {existing_tp_size}, "
+        "created by an earlier engine or model. "
+        "DeepSpeed keeps these groups process-wide, so engines with different tensor parallel sizes "
+        "cannot be built in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+
+
 def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
     """Initialize model data parallel groups."""
 
@@ -212,6 +232,7 @@ def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
     global _TENSOR_MODEL_PARALLEL_GROUP
 
     if _TENSOR_MODEL_PARALLEL_GROUP is not None:
+        _check_existing_tp_groups(tensor_model_parallel_size)
         return
 
     if data_parallel_size is None:
@@ -916,6 +937,8 @@ def _get_sequence_data_parallel_world_size():
     global mpu
     if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_world_size'):
         return mpu.get_sequence_data_parallel_world_size()
+    if mesh_device is not None and mpu is None:
+        return dist.get_world_size(group=_get_sequence_data_parallel_group())
     return _get_data_parallel_world_size()
 
 
@@ -924,6 +947,8 @@ def _get_sequence_data_parallel_rank():
     global mpu
     if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_rank'):
         return mpu.get_sequence_data_parallel_rank()
+    if mesh_device is not None and mpu is None:
+        return dist.get_rank(group=_get_sequence_data_parallel_group())
     return _get_data_parallel_rank()
 
 
@@ -933,6 +958,9 @@ def _get_sequence_data_parallel_group():
     # gradient allreduce must be across both dimensions of data and sequence parallelism.
     if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_group'):
         return mpu.get_sequence_data_parallel_group()
+    if mesh_device is not None and mpu is None:
+        # The (data_parallel, sequence_parallel) mesh covers every rank, so the combined group is the world.
+        return _clone_world_group()
     return _get_data_parallel_group()
 
 
