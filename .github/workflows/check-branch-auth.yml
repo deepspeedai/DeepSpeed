@@ -1,0 +1,38 @@
+name: Check release workflow authentication
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - tohtana/check-release-workflow
+
+permissions: {}
+
+jobs:
+  branch-check:
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Identify the workflow token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api graphql -f query='{ viewer { login } }' --jq '.data.viewer.login'
+
+  release-pat:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    environment: release-env
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check the release PAT identity
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo 'GH_PAT is empty'
+            exit 1
+          fi
+          gh api user --jq .login
