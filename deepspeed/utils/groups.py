@@ -209,8 +209,9 @@ def _init_tp_groups_with_new_group(tensor_model_parallel_size=1, data_parallel_s
 
 def _existing_tp_groups_match(tensor_model_parallel_size):
     """Whether an engine with this tensor parallel size can use the process-wide TP/DP groups."""
-    return (_TENSOR_MODEL_PARALLEL_GROUP is None
-            or dist.get_world_size(group=_TENSOR_MODEL_PARALLEL_GROUP) == tensor_model_parallel_size)
+    if _TENSOR_MODEL_PARALLEL_GROUP is None:
+        return not _EXPERT_PARALLEL_GROUP or tensor_model_parallel_size == 1
+    return dist.get_world_size(group=_TENSOR_MODEL_PARALLEL_GROUP) == tensor_model_parallel_size
 
 
 def _check_existing_tp_groups(tensor_model_parallel_size):
@@ -348,10 +349,11 @@ def _get_or_create_tp_groups(tensor_model_parallel_size, data_parallel_size=None
     With ``process_wide=False`` the engine cannot publish its groups to ``groups.mpu``, which holds an mpu
     passed to an earlier engine: existing groups with its layout are reused, but none are made process-wide.
     """
-    if _TENSOR_MODEL_PARALLEL_GROUP is None and process_wide:
+    can_publish = process_wide and _existing_tp_groups_match(tensor_model_parallel_size)
+    if _TENSOR_MODEL_PARALLEL_GROUP is None and can_publish:
         _init_tp_mesh_device(tensor_model_parallel_size, data_parallel_size)
     if _TENSOR_MODEL_PARALLEL_GROUP is not None and _existing_tp_groups_match(tensor_model_parallel_size):
-        return TensorParallelGroups(_DATA_PARALLEL_GROUP, _TENSOR_MODEL_PARALLEL_GROUP, process_wide=process_wide)
+        return TensorParallelGroups(_DATA_PARALLEL_GROUP, _TENSOR_MODEL_PARALLEL_GROUP, process_wide=can_publish)
     return TensorParallelGroups.create(tensor_model_parallel_size, data_parallel_size)
 
 

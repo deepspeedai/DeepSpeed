@@ -178,6 +178,26 @@ def test_rollout_uses_the_engines_own_tp_groups_for_rng_and_capture(monkeypatch)
     rollout.engine = SimpleNamespace(autotp_size=lambda: 4, mpu=engine_groups)
     assert rollout._capture_groups() == [own_tp]
 
+    # Wrappers exposing only .module (either the engine or its sharded nn.Module) still use the engine's TP group.
+    broadcasts.clear()
+    inner_engine = SimpleNamespace(autotp_size=lambda: 4, mpu=engine_groups)
+    rollout.engine = SimpleNamespace(module=inner_engine)
+    assert rollout._tensor_parallel_size() == 4
+    assert rollout._capture_groups() == [own_tp]
+    rollout._sync_rng_across_tp()
+    assert broadcasts == [(2, own_tp)]
+
+    broadcasts.clear()
+    sharded_module = torch.nn.Linear(2, 2)
+    sharded_module.ds_autotp_size = 4
+    sharded_module._ds_autotp_group = own_tp
+    sharded_module._ds_autotp_dp_group = own_dp
+    rollout.engine = SimpleNamespace(module=sharded_module)
+    assert rollout._tensor_parallel_size() == 4
+    assert rollout._capture_groups() == [own_tp]
+    rollout._sync_rng_across_tp()
+    assert broadcasts == [(2, own_tp)]
+
 
 def test_recapture_is_agreed_over_the_hybrid_engine_inference_tp_group(monkeypatch):
     engine = DeepSpeedHybridEngine.__new__(DeepSpeedHybridEngine)

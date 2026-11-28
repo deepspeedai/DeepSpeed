@@ -269,7 +269,11 @@ class CheckOverflow(object):
             # Only need to check groups.get_largest_expert_parallel_group()
             dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=groups._get_max_expert_parallel_group())
         if self.mpu is not None:
-            dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_model_parallel_group())
+            if reduce_overflow and groups._is_dense_data_parallel(self.mpu):
+                dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_data_parallel_group())
+                dist.barrier(group=self.mpu.get_data_parallel_group())
+            else:
+                dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_model_parallel_group())
         elif reduce_overflow:
             dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX)
             dist.barrier()
@@ -356,7 +360,7 @@ def get_global_norm(norm_list):
     return sqrt(total_norm)
 
 
-def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
+def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None, data_parallel_group=None):
     """Clips gradient norm of an iterable of parameters.
 
     This has been adapted from Nvidia megatron. We add norm averaging
@@ -488,7 +492,9 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     else:
         # Need to average total_norm across different GPUs due to the presence of moe params
         # An engine's own TP/DP groups or explicit mpu may differ from the process-wide ones (#9081).
-        if mpu is not None and mpu is not groups and not hasattr(mpu, 'initialize_sequence_parallel') \
+        if data_parallel_group is not None:
+            pg = data_parallel_group
+        elif mpu is not None and mpu is not groups and not hasattr(mpu, 'initialize_sequence_parallel') \
                 and hasattr(mpu, 'get_data_parallel_group'):
             pg = mpu.get_data_parallel_group()
         else:

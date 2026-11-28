@@ -320,18 +320,35 @@ class HybridEngineRollout(RolloutEngine):
 
     def _tensor_parallel_groups(self):
         from deepspeed.utils import groups
-        mpu = getattr(self.engine, "mpu", None)
-        if isinstance(mpu, groups.TensorParallelGroups):
-            return mpu
+        for candidate in (self.engine, getattr(self.engine, "module", None)):
+            mpu = getattr(candidate, "mpu", None)
+            if isinstance(mpu, groups.TensorParallelGroups):
+                return mpu
+            if isinstance(candidate, torch.nn.Module):
+                tp_group = candidate.__dict__.get("_ds_autotp_group")
+                if tp_group is not None:
+                    dp_group = candidate.__dict__.get("_ds_autotp_dp_group")
+                    return groups.TensorParallelGroups(dp_group, tp_group, process_wide=False)
         return groups
+
+    def _configured_autotp_size(self):
+        for candidate in (self.engine, getattr(self.engine, "module", None)):
+            autotp_size = getattr(candidate, "autotp_size", None)
+            if callable(autotp_size):
+                autotp_size = autotp_size()
+            if isinstance(autotp_size, int):
+                return autotp_size
+            if isinstance(candidate, torch.nn.Module):
+                autotp_size = candidate.__dict__.get("ds_autotp_size")
+                if isinstance(autotp_size, int):
+                    return autotp_size
+        return None
 
     def _tensor_parallel_size(self):
         """Return the AutoTP size from the engine, or from DeepSpeed's tensor-parallel group for wrapped engines."""
-        autotp_size = getattr(self.engine, "autotp_size", None)
-        if callable(autotp_size):
-            size = autotp_size()
-            if isinstance(size, int):
-                return size
+        size = self._configured_autotp_size()
+        if size is not None:
+            return size
         if not dist.is_initialized():
             return 1
         try:
@@ -1251,9 +1268,7 @@ class HybridEngineRollout(RolloutEngine):
     def _capture_groups(self, module=None):
         """The tensor-parallel groups whose collectives a decode forward runs."""
         capture_groups = []
-        autotp_size = getattr(self.engine, "autotp_size", None)
-        if callable(autotp_size):
-            autotp_size = autotp_size()
+        autotp_size = self._configured_autotp_size()
         if isinstance(autotp_size, int) and autotp_size > 1:
             capture_groups.append(self._tensor_parallel_groups().get_tensor_model_parallel_group())
         # DeepSpeedHybridEngine with inference_tp_size > 1 shards the inference

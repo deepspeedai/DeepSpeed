@@ -575,7 +575,7 @@ def initialize(
             mesh_device = dist.initialize_mesh_device((dist.get_world_size() // sp_size, sp_size),
                                                       ("data_parallel", "sequence_parallel"))
 
-    merge_tp_model_init_into_config(config, mpu, mesh_param, dist)
+    merge_tp_model_init_into_config(config, mpu, mesh_param, dist, model=model)
 
     autotp_size = config.get("tensor_parallel", {}).get("autotp_size", 0)
     if autotp_size and autotp_size > 0:
@@ -841,7 +841,7 @@ def tp_model_init(model: torch.nn.Module,
         logger.warning("ds_autotp_parsed' attribute already exists in the model; tp_model_init is now record-only.")
 
     tp_group = kwargs.get("tp_group")
-    record_tp_model_init_args(tp_size=tp_size, dtype=dtype, tp_group=tp_group, dist_module=dist)
+    record_tp_model_init_args(tp_size=tp_size, dtype=dtype, tp_group=tp_group, dist_module=dist, model=model)
 
     # Keep AutoTP training mode active for backward compatibility.
     set_autotp_mode(training=True)

@@ -358,9 +358,10 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         autoep = make_autoep_config(ep_size=2, mixed_precision=False)
         autoep["optimizer"]["params"]["torch_adam"] = True
         first = build_engine(tp_size=1, model=MockMoEOnlyTransformer(), extra_config=autoep)
-        build_engine(tp_size=2)
+        dense_tp2 = build_engine(tp_size=2)
+        assert not dense_tp2.mpu.process_wide
         with pytest.raises(ValueError, match="MoE layers"):
-            build_engine(tp_size=1, model=first.module)
+            build_engine(tp_size=2, model=first.module)
 
     def test_hybrid_engine_with_a_mesh_after_autotp_raises(self):
         # The hybrid engine was not given the mesh, so it ran on TP1 groups over every rank instead.
@@ -446,20 +447,38 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert third.mpu.get_tensor_model_parallel_world_size() == 1
         assert third.dp_world_size == dist.get_world_size()
 
+    @pytest.mark.parametrize("zero_stage", [0, 1])
     @pytest.mark.parametrize("shard", [True, False])
-    def test_storage_maps_of_a_model_on_groups_of_its_own(self, shard):
-        # The default TP group was the process-wide one, which an engine after an explicit mpu does not create;
-        # when no layer is replaced (shard=False), the group comes from the model attribute recorded by the engine.
+    def test_storage_maps_of_a_model_on_groups_of_its_own(self, shard, zero_stage):
+        # Neither the TP group nor the default replica DP group (used for ZeRO-0 / DummyOptim and frozen ZeRO-1
+        # parameters) may come from groups.mpu when the engine holds groups of its own.
         from deepspeed.checkpoint.zero_affine import autotp_storage_affine_maps
         build_engine(tp_size=1, mpu=HalvesMPU())
-        zero1 = {"zero_allow_untested_optimizer": True, "zero_optimization": {"stage": 1}}
-        autotp = build_engine(tp_size=2,
-                              shard=shard,
-                              optimizer=lambda params: torch.optim.SGD(params, lr=0.1),
-                              extra_config=zero1)
+        model = SimpleModel(hidden_dim=8)
+        if zero_stage == 1:
+            model.linears[0].bias.requires_grad_(False)
+            extra = {"zero_allow_untested_optimizer": True, "zero_optimization": {"stage": 1}}
+            opt = lambda params: torch.optim.SGD([p for p in params if p.requires_grad], lr=0.1)
+        else:
+            extra = {"zero_optimization": {"stage": 0}}
+            opt = None
+        autotp = build_engine(tp_size=2, shard=shard, model=model, optimizer=opt, extra_config=extra)
         assert not autotp.mpu.process_wide
         maps = autotp_storage_affine_maps(autotp.module)
+        all_ranks = set(range(dist.get_world_size()))
         assert set(maps) == {name for name, _ in autotp.module.named_parameters()}
+        for param_map in maps.values():
+            assert not param_map.uncovered_offsets()
+            assert {rank for rank, pieces in param_map.pieces_by_rank.items() if pieces} == all_ranks
+        serialized = [None] * dist.get_world_size()
+        dist.all_gather_object(serialized, {k: v.to_dict() for k, v in maps.items()})
+        assert all(rank_maps == serialized[0] for rank_maps in serialized)
+
+        tp1 = build_engine(tp_size=1)
+        tp1_maps = autotp_storage_affine_maps(tp1.module)
+        for param_map in tp1_maps.values():
+            assert not param_map.uncovered_offsets()
+            assert {rank for rank, pieces in param_map.pieces_by_rank.items() if pieces} == all_ranks
 
     @pytest.mark.parametrize("zero_extra", [
         {
@@ -583,7 +602,13 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         }
         engine = build_engine(tp_size=1, extra_config=muon)
         assert isinstance(engine.mpu, groups.TensorParallelGroups)
-        assert engine.optimizer._uses_muon
+        before = [p.detach().float().clone() for p in engine.module.parameters()]
+        inputs = torch.ones(1, 8, device=engine.device, dtype=torch.bfloat16)
+        labels = torch.zeros(1, dtype=torch.long, device=engine.device)
+        loss = engine(inputs, labels)
+        engine.backward(loss)
+        engine.step()
+        assert any(not torch.equal(old, p.detach().float()) for old, p in zip(before, engine.module.parameters()))
 
     def test_hybrid_engine_after_an_autotp_engine_builds_inference_groups(self):
         # The engine's own TP1 groups must not stand in for the inference tensor parallel groups.
@@ -675,6 +700,93 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         again.backward(loss)
         again.step()
 
+    def test_mesh_engine_guards_and_plain_dp_after_mesh(self):
+        mesh_engine = build_engine(tp_size=1, mesh_param=(2, 2))
+        kept_mesh = groups.mesh_device
+        assert mesh_engine.dp_world_size == 2
+        assert mesh_engine.sequence_parallel_size == 2
+
+        # Same mesh layout reuses groups.mesh_device; incompatible mesh or explicit mpu raises.
+        same_mesh = build_engine(tp_size=1, mesh_param=(2, 2))
+        assert same_mesh.mesh_device is kept_mesh
+        with pytest.raises(RuntimeError, match="mesh.*9081"):
+            build_engine(tp_size=1, mesh_param=(dist.get_world_size(), 1))
+        with pytest.raises(RuntimeError, match="mesh.*9081"):
+            build_engine(tp_size=1, mpu=HalvesMPU())
+        assert groups.mesh_device is kept_mesh
+
+        # A plain DP engine without a mesh gets its own TP1 groups instead of inheriting the (2, 2) mesh.
+        lr = 0.1
+        plain = build_engine(tp_size=1, optimizer=lambda params: torch.optim.SGD(params, lr=lr))
+        assert isinstance(plain.mpu, groups.TensorParallelGroups)
+        assert not plain.mpu.process_wide
+        assert plain.dp_world_size == dist.get_world_size()
+        assert plain.sequence_parallel_size == 1
+        assert groups.mesh_device is kept_mesh
+
+        reference = SimpleModel(hidden_dim=8).to(plain.device)
+        reference.load_state_dict(plain.module.state_dict())
+        reference_opt = torch.optim.SGD(reference.parameters(), lr=lr)
+        rank = dist.get_rank()
+        x = torch.arange(dist.get_world_size() * 8, dtype=torch.float32,
+                         device=plain.device).view(dist.get_world_size(), 8)
+        y = torch.zeros(dist.get_world_size(), dtype=torch.long, device=plain.device)
+        reference(x, y).backward()
+        reference_opt.step()
+        loss = plain(x[rank:rank + 1], y[rank:rank + 1])
+        plain.backward(loss)
+        plain.step()
+        for actual, expected in zip(plain.module.parameters(), reference.parameters()):
+            torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+    def test_moe_or_sp_engine_blocks_conflicting_later_global_layouts(self):
+        moe1 = build_engine(tp_size=1,
+                            model=SimpleMoEModel(hidden_dim=8),
+                            optimizer=lambda params: torch.optim.SGD(params, lr=0.1))
+        with pytest.raises(ValueError, match="MoE.*9081"):
+            build_engine(tp_size=2, model=SimpleMoEModel(hidden_dim=8))
+        with pytest.raises(RuntimeError, match="9081"):
+            build_engine(tp_size=1, mpu=HalvesMPU())
+        assert moe1.dp_world_size == dist.get_world_size()
+
+    def test_tp_model_init_is_scoped_to_its_model_and_rejects_partial_group(self):
+        model1 = SimpleModel(hidden_dim=8)
+        deepspeed.tp_model_init(model1, tp_size=2, dtype=torch.float32)
+        first = build_engine(tp_size=2, model=model1)
+        assert first.autotp_size() == 2
+
+        # A subsequent plain engine without tp_model_init is not sharded at model1's tp_size.
+        second = build_engine(tp_size=1)
+        assert second.autotp_size() in (0, 1)
+        assert second.dp_world_size == dist.get_world_size()
+
+        # A subgroup covering only half the ranks returns NON_GROUP_MEMBER on peers; all ranks reject together.
+        partial_group = dist.new_group(ranks=[0, 1])
+        bad_model = SimpleModel(hidden_dim=8)
+        deepspeed.tp_model_init(bad_model, tp_size=2, dtype=torch.float32, tp_group=partial_group)
+        with pytest.raises(ValueError, match="tp_group size"):
+            deepspeed.initialize(model=bad_model,
+                                 model_parameters=bad_model.parameters(),
+                                 config={"train_micro_batch_size_per_gpu": 1})
+
+    def test_presharded_model_with_same_tp_size_but_different_ranks_raises(self):
+        dp_groups = [dist.new_group(ranks=[0, 1]), dist.new_group(ranks=[2, 3])]
+        tp_groups = [dist.new_group(ranks=[0, 2]), dist.new_group(ranks=[1, 3])]
+        rank = dist.get_rank()
+        alt_mpu = groups.TensorParallelGroups(dp_groups[rank // 2], tp_groups[rank % 2], process_wide=False)
+        first = build_engine(tp_size=2, mpu=alt_mpu, shard=True)
+        with pytest.raises(ValueError, match="tensor parallel group"):
+            build_engine(tp_size=2, model=first.module)
+
+    def test_zero3_inference_engine_populates_dp_process_group_for_rollout(self):
+        from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout
+        build_engine(tp_size=2)
+        rollout_engine = build_engine(tp_size=4, extra_config={"zero_optimization": {"stage": 3}})
+        assert rollout_engine.optimizer.dp_process_group is rollout_engine.seq_data_parallel_group
+        rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+        rollout.engine = rollout_engine
+        assert rollout._zero3_work_remaining() is not None
+
 
 class MLP(torch.nn.Module):
 
@@ -709,10 +821,10 @@ class TestAutoTPEnginesWithDifferentTPSizesTrain(DistributedTest):
     reuse_dist_env = False
 
     @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
-    @pytest.mark.parametrize("tp_sizes", [(2, 4), (4, 2)])
+    @pytest.mark.parametrize("tp_sizes", [(1, 2), (2, 4), (4, 2)])
     def test_each_engine_matches_an_unsharded_model(self, tp_sizes, zero_stage):
         hidden_dim, lr, clip = 8, 1e-2, 0.1
-        global_batch = dist.get_world_size()
+        global_batch = 2 * dist.get_world_size()
         torch.manual_seed(0)
         reference = MLP(hidden_dim)
         engines = []
@@ -730,17 +842,19 @@ class TestAutoTPEnginesWithDifferentTPSizesTrain(DistributedTest):
                 "zero_optimization": {
                     "stage": zero_stage
                 },
-                "tensor_parallel": {
-                    "autotp_size": tp_size,
-                    "partition_config": MLP_PARTITION_CONFIG
-                },
             }
+            if tp_size > 1:
+                config["tensor_parallel"] = {"autotp_size": tp_size, "partition_config": MLP_PARTITION_CONFIG}
             model = copy.deepcopy(reference)
             engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
             engines.append(engine)
 
         for engine, tp_size in zip(engines, tp_sizes):
-            assert engine.mpu.get_tensor_model_parallel_world_size() == tp_size
+            if tp_size > 1:
+                assert engine.mpu.get_tensor_model_parallel_world_size() == tp_size
+            else:
+                assert engine.get_tensor_parallel_rank() == 0
+                assert engine.get_model_parallel_rank() == 0
             # ZeRO-3 partitions the TP shard further; ds_shape is the shard it partitions.
             up_shape = getattr(engine.module.up.weight, "ds_shape", engine.module.up.weight.shape)
             down_shape = getattr(engine.module.down.weight, "ds_shape", engine.module.down.weight.shape)
@@ -753,7 +867,7 @@ class TestAutoTPEnginesWithDifferentTPSizesTrain(DistributedTest):
         generator = torch.Generator().manual_seed(1)
         for _ in range(4):
             # Each data parallel rank gets its own part of the batch, so a wrong data parallel group shows up as
-            # a different update. The loss compares the parameters left by the previous step.
+            # a different update.
             x = torch.randn(global_batch, hidden_dim, generator=generator).to(device)
             y = torch.randint(0, hidden_dim, (global_batch, ), generator=generator).to(device)
             for engine in engines:
@@ -769,3 +883,11 @@ class TestAutoTPEnginesWithDifferentTPSizesTrain(DistributedTest):
             reference(x, y).backward()
             torch.nn.utils.clip_grad_norm_(reference.parameters(), clip)
             reference_optimizer.step()
+
+        x = torch.randn(global_batch, hidden_dim, generator=generator).to(device)
+        y = torch.randint(0, hidden_dim, (global_batch, ), generator=generator).to(device)
+        for engine in engines:
+            dp_size, dp_rank = engine.dp_world_size, engine.get_data_parallel_rank()
+            part = slice(dp_rank * global_batch // dp_size, (dp_rank + 1) * global_batch // dp_size)
+            with torch.no_grad():
+                torch.testing.assert_close(engine(x[part], y[part]), reference(x[part], y[part]), rtol=1e-4, atol=1e-5)

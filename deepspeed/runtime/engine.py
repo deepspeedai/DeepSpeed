@@ -434,6 +434,24 @@ def _remap_client_optimizer_after_module_replacement(optimizer, model, replaceme
         "because none of their sources were in this optimizer.", stale, added, unoptimized)
 
 
+def _group_global_ranks(group):
+    if group is None:
+        return None
+    size = dist.get_world_size(group=group)
+    if size < 0:
+        return []
+    return [dist.get_global_rank(group, r) for r in range(size)]
+
+
+def _meshes_match(mesh_a, mesh_b):
+    dim_names = getattr(mesh_a, "mesh_dim_names", None)
+    if not dim_names or dim_names != getattr(mesh_b, "mesh_dim_names", None):
+        return False
+    return all(
+        _group_global_ranks(mesh_a.get_group(
+            mesh_dim=dim_name)) == _group_global_ranks(mesh_b.get_group(mesh_dim=dim_name)) for dim_name in dim_names)
+
+
 def _checkpoint_parallel_metadata(mpu):
     from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size, bwc_tensor_model_parallel_world_size
 
@@ -579,6 +597,23 @@ class DeepSpeedEngine(Module):
                 "An engine with a data/sequence parallel mesh cannot be built after an AutoTP engine or an engine "
                 "with an explicit mpu in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081)."
             )
+        if mesh_device is not None and groups.mesh_device is not None:
+            if not _meshes_match(mesh_device, groups.mesh_device):
+                raise RuntimeError(
+                    "An engine with a different data/sequence parallel mesh cannot be built in the same process yet "
+                    "(see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+            mesh_device = groups.mesh_device
+        explicit_mpu = (self.mpu if self.mpu is not None and not isinstance(self.mpu, groups.TensorParallelGroups) else
+                        (model.mpu() if isinstance(model, PipelineModule) and hasattr(model, "mpu") else None))
+        if explicit_mpu is not None and groups.mesh_device is not None:
+            raise RuntimeError(
+                "An engine with an explicit mpu cannot be built after an engine with a data/sequence parallel mesh "
+                "in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+        if explicit_mpu is not None and explicit_mpu is not groups.mpu and (groups._EXPERT_PARALLEL_GROUP or getattr(
+                groups.mpu, "get_sequence_parallel_world_size", lambda: 1)() > 1):
+            raise RuntimeError(
+                "An engine with an explicit mpu cannot be built after an MoE, AutoEP, or sequence parallel engine "
+                "in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
         from deepspeed.module_inject.layers import TensorParallel_Layer
         for module in model.modules():
             sharded_tp_size = getattr(module, "ds_autotp_size", None)
@@ -656,12 +691,18 @@ class DeepSpeedEngine(Module):
             # Head counts were recorded against the whole model; the parameters are shards now.
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
-        elif self.mpu is None and groups.mpu is not None and self.mesh_device is None \
-                and not self._sequence_parallel_from_groups_mpu():
-            # Without an mpu of its own, this engine would inherit groups.mpu: the layout of an earlier engine,
-            # whose data parallel group may cover only part of the ranks. It gets groups of its own instead.
+        elif self.mpu is None and (groups.mpu is not None or groups.mesh_device is not None) \
+                and self.mesh_device is None and not self._sequence_parallel_from_groups_mpu():
+            # Without an mpu of its own, this engine would inherit groups.mpu or groups.mesh_device: the layout of
+            # an earlier engine, whose data parallel group may cover only part of the ranks.
             self.mpu = groups._get_or_create_tp_groups(tensor_model_parallel_size=1,
-                                                       process_wide=not groups._holds_explicit_mpu())
+                                                       process_wide=not groups._holds_explicit_mpu()
+                                                       and groups.mesh_device is None)
+        if self._owns_parallel_groups():
+            if not hasattr(model, "_ds_autotp_group"):
+                setattr(model, "_ds_autotp_group", self.mpu.get_tensor_model_parallel_group())
+            if not hasattr(model, "_ds_autotp_dp_group"):
+                setattr(model, "_ds_autotp_dp_group", self.mpu.get_data_parallel_group())
         self._configure_quantization(model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)
@@ -1037,14 +1078,44 @@ class DeepSpeedEngine(Module):
             return self.mpu.get_sequence_parallel_world_size()
         return groups._get_sequence_parallel_world_size()
 
+    def _check_tp_group_matches_engine(self, group, description):
+        expected_ranks = _group_global_ranks(self.mpu.get_tensor_model_parallel_group())
+        actual_ranks = expected_ranks if group is None else _group_global_ranks(group)
+        mismatch = torch.tensor([int(actual_ranks != expected_ranks)], device=get_accelerator().current_device_name())
+        dist.all_reduce(mismatch, op=dist.ReduceOp.MAX)
+        if mismatch.item():
+            raise ValueError(f"{description} has ranks {_group_global_ranks(group)}, "
+                             f"but this engine's tensor parallel group has ranks {expected_ranks}.")
+
     def _configure_tensor_parallel(self, model, tp_config):
+        tp_size = self.autotp_size()
+        if not getattr(model, "ds_autotp_parsed", False):
+            if tp_config.tensor_parallel.tp_size not in (1, tp_size):
+                raise ValueError(f"tensor_parallel.tp.tp_size ({tp_config.tensor_parallel.tp_size}) "
+                                 f"does not match tensor_parallel.autotp_size ({tp_size}).")
+            if tp_config.vocab_parallel_embedding and self.is_deepcompile_enabled() and self.compile_autotp():
+                raise ValueError("vocab_parallel_embedding does not support the DeepCompile 'autotp' pass")
         self._configure_tensor_parallel_states(model)
+        from deepspeed.module_inject.layers import TensorParallel_Layer
+        sharded_tp_group = getattr(model, "_ds_autotp_group", None)
+        if sharded_tp_group is None:
+            sharded_tp_group = next(
+                (m.mp_group for m in model.modules()
+                 if isinstance(m, TensorParallel_Layer) and m.tp_world_size > 1 and m.mp_group is not None), None)
+        if sharded_tp_group is not None:
+            self._check_tp_group_matches_engine(sharded_tp_group,
+                                                "The tensor parallel group the model was already sharded with")
+        if tp_config.tensor_parallel.tp_group is not None or not getattr(model, "ds_autotp_parsed", False):
+            self._check_tp_group_matches_engine(tp_config.tensor_parallel.tp_group,
+                                                "The tensor parallel group passed to tp_model_init")
         configure_tensor_parallel_runtime(tp_config)
         replacement_sources = self._apply_autotp_partitioning(model, tp_config)
         if not hasattr(model, "ds_autotp_size"):
             setattr(model, "ds_autotp_size", self.autotp_size())
         if not hasattr(model, "_ds_autotp_group"):
             setattr(model, "_ds_autotp_group", self.mpu.get_tensor_model_parallel_group())
+        if not hasattr(model, "_ds_autotp_dp_group"):
+            setattr(model, "_ds_autotp_dp_group", self.mpu.get_data_parallel_group())
         return replacement_sources
 
     def _configure_tensor_parallel_states(self, model):
@@ -1063,6 +1134,12 @@ class DeepSpeedEngine(Module):
         # have its layout, else new ones (#9081).
         if isinstance(self.mpu, groups.TensorParallelGroups):
             tp_groups = self.mpu
+        elif getattr(model, "_ds_autotp_group", None) is not None \
+                and getattr(model, "_ds_autotp_dp_group", None) is not None \
+                and (groups._holds_explicit_mpu() or not groups._existing_tp_groups_match(self.autotp_size())):
+            tp_groups = groups.TensorParallelGroups(model._ds_autotp_dp_group,
+                                                    model._ds_autotp_group,
+                                                    process_wide=False)
         else:
             tp_groups = groups._get_or_create_tp_groups(tensor_model_parallel_size=self.autotp_size(),
                                                         process_wide=not groups._holds_explicit_mpu())
@@ -1136,30 +1213,9 @@ class DeepSpeedEngine(Module):
             get_accelerator().set_device(self.local_rank)
 
         tp_size = self.autotp_size()
-        if tp_config.tensor_parallel.tp_size not in (1, tp_size):
-            raise ValueError(f"tensor_parallel.tp.tp_size ({tp_config.tensor_parallel.tp_size}) "
-                             f"does not match tensor_parallel.autotp_size ({tp_size}).")
         tp_config.tensor_parallel.tp_size = tp_size
         # The layers must shard over the engine's TP group: the engine broadcasts and reduces over its DP group.
-        engine_tp_group = self.mpu.get_tensor_model_parallel_group()
-        requested_tp_group = tp_config.tensor_parallel.tp_group
-        if requested_tp_group is not None:
-
-            def group_ranks(group):
-                return [dist.get_global_rank(group, r) for r in range(dist.get_world_size(group=group))]
-
-            # Ranks whose groups match would otherwise wait in the next collective for the ranks that raise.
-            mismatch = torch.tensor([int(group_ranks(requested_tp_group) != group_ranks(engine_tp_group))],
-                                    device=get_accelerator().current_device_name())
-            dist.all_reduce(mismatch, op=dist.ReduceOp.MAX)
-            if mismatch.item():
-                raise ValueError(f"The tensor parallel group passed to tp_model_init has ranks "
-                                 f"{group_ranks(requested_tp_group)}, but this engine's tensor parallel group has "
-                                 f"ranks {group_ranks(engine_tp_group)}.")
-        tp_config.tensor_parallel.tp_group = engine_tp_group
-        if tp_config.vocab_parallel_embedding and self.is_deepcompile_enabled() and self.compile_autotp():
-            # The pass rewrites only linear layers, so engine.compile() would reject the sharded embedding.
-            raise ValueError("vocab_parallel_embedding does not support the DeepCompile 'autotp' pass")
+        tp_config.tensor_parallel.tp_group = self.mpu.get_tensor_model_parallel_group()
 
         from deepspeed.module_inject.auto_tp import AutoTP
 
@@ -1631,11 +1687,15 @@ class DeepSpeedEngine(Module):
                 raise ValueError(f"The mpu passed to this engine holds another engine's groups with tensor parallel "
                                  f"size {borrowed_tp_size}, but this engine has tensor parallel size "
                                  f"{max(requested_tp_size, 1)}.")
-            return not self.mpu.process_wide or groups._holds_explicit_mpu()
+            return not self.mpu.process_wide or groups._holds_explicit_mpu() or groups.mesh_device is not None
         if requested_tp_size > 1:
             # groups.mpu holds an mpu passed to an earlier engine; this engine cannot replace it.
             return groups._holds_explicit_mpu() or not groups._existing_tp_groups_match(requested_tp_size)
-        if self.mpu is not None or groups.mpu is None or self._sequence_parallel_from_groups_mpu():
+        if self.mpu is not None or self._sequence_parallel_from_groups_mpu():
+            return False
+        if groups.mesh_device is not None:
+            return mesh_device is None
+        if groups.mpu is None:
             return False
         # Without an mpu of its own, this engine gets TP1 groups instead of inheriting groups.mpu.
         if groups.mpu is groups:
@@ -1683,16 +1743,30 @@ class DeepSpeedEngine(Module):
         if self.mpu is not None and self.mpu is not groups and not hasattr(self.mpu, 'initialize_sequence_parallel') \
                 and hasattr(self.mpu, 'get_data_parallel_rank'):
             return self.mpu.get_data_parallel_rank()
+        if self.data_parallel_group is not None:
+            return dist.get_rank(group=self.data_parallel_group)
+        if getattr(self, 'seq_data_parallel_group', None) is not None:
+            return dist.get_rank(group=self.seq_data_parallel_group)
         return groups.get_data_parallel_rank()
 
     def get_tensor_parallel_rank(self):
-        if self.mpu is not None and self.mpu is not groups and hasattr(self.mpu, 'get_tensor_model_parallel_rank'):
-            return self.mpu.get_tensor_model_parallel_rank()
+        if self.mpu is not None and self.mpu is not groups:
+            if hasattr(self.mpu, 'initialize_sequence_parallel'):
+                return 0
+            from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
+            return bwc_tensor_model_parallel_rank(self.mpu)
+        if self.mpu is None:
+            return 0
         return groups.get_tensor_model_parallel_rank()
 
     def get_model_parallel_rank(self):
-        if self.mpu is not None and self.mpu is not groups and hasattr(self.mpu, 'get_model_parallel_rank'):
-            return self.mpu.get_model_parallel_rank()
+        if self.mpu is not None and self.mpu is not groups:
+            if hasattr(self.mpu, 'initialize_sequence_parallel'):
+                return 0
+            if hasattr(self.mpu, 'get_model_parallel_rank'):
+                return self.mpu.get_model_parallel_rank()
+        if self.mpu is None:
+            return 0
         return groups.get_model_parallel_rank()
 
     def get_sequence_parallel_group(self):
@@ -3040,6 +3114,7 @@ class DeepSpeedEngine(Module):
                     max_live_parameters=self.zero_max_live_parameters(),
                     param_persistence_threshold=self.zero_param_persistence_threshold(),
                     model_persistence_threshold=self.zero_model_persistence_threshold(),
+                    dp_process_group=self.seq_data_parallel_group,
                     offload_param_config=self.zero_offload_param(),
                     mpu=self.mpu,
                     zero_param_parallel_group=zero_param_parallel_group,
@@ -3845,7 +3920,10 @@ class DeepSpeedEngine(Module):
             param.grad = None
 
     def clip_fp32_gradients(self):
-        clip_grad_norm_(parameters=self.module.parameters(), max_norm=self.gradient_clipping(), mpu=self.mpu)
+        clip_grad_norm_(parameters=self.module.parameters(),
+                        max_norm=self.gradient_clipping(),
+                        mpu=self.mpu,
+                        data_parallel_group=self.data_parallel_group)
 
     def _take_model_step(self, lr_kwargs):
         if self.gradient_clipping() > 0.0:
@@ -4252,7 +4330,7 @@ class DeepSpeedEngine(Module):
     def _reduce_expert_gradients(self, expert_grads, elements_per_buffer):
         # to maintain the gradients value unaffected by ep_size setting,
         # utilize dp_world_size for allreduce average
-        dp_world_size = dist.get_world_size(groups._get_data_parallel_group())
+        dp_world_size = self.dp_world_size
         for ep_name, expert_grads_group in expert_grads.items():
             ep_dp_group = groups._get_expert_data_parallel_group(ep_name)
             split_sparse_tensor_buckets, split_dense_tensor_buckets = split_half_float_double_sparse(
