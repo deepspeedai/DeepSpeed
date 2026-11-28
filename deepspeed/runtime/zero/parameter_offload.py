@@ -184,6 +184,11 @@ class DeepSpeedZeRoOffload(object):
 
         _inject_parameters(module, ZeROOrderedDict)
 
+        # Ranks compare these positions rather than ds_ids, which count everything the process has built.
+        # _register_deepspeed_module numbers the modules as it visits them.
+        self.param_positions = {param.ds_id: position for position, param in enumerate(module.parameters())}
+        self.module_positions = {}
+
         self.param_numel_persistence_threshold = int(param_persistence_threshold)
         self.model_persistence_threshold = int(model_persistence_threshold)
         self.persistent_parameters = self.mark_persistent_parameters(self.param_numel_persistence_threshold,
@@ -221,6 +226,8 @@ class DeepSpeedZeRoOffload(object):
             zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights,
             fast_sharding_for_leaf_module=self.fast_sharding_for_leaf_module,
             log_trace_cache_warnings=self.log_trace_cache_warnings,
+            module_positions=self.module_positions,
+            param_positions=self.param_positions,
         )
 
         self.forward_hooks = []
@@ -352,8 +359,10 @@ class DeepSpeedZeRoOffload(object):
             coordinator = self.get_param_coordinator()
             if coordinator is not None and not coordinator.is_invalid_trace():
                 coordinator._invalidate_trace()
+            self.module_positions.clear()
         my_count = count[0]
         module.ds_id = my_count
+        self.module_positions[module.ds_id] = len(self.module_positions)
         module.ds_recompute_parameters = set()
 
         if z3_leaf_module(module):

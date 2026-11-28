@@ -5,7 +5,7 @@
 
 import os
 import gc
-from typing import List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
 from deepspeed import comm as dist
@@ -86,6 +86,36 @@ def is_zero_supported_optimizer(optimizer):
     return type(optimizer) in ZERO_SUPPORTED_OPTIMIZERS
 
 
+def agreement_ids(objects: Iterable, positions: Optional[Dict[int, int]]) -> List[int]:
+    """What ranks compare to check that they hold the same modules or parameters, in the same order.
+
+    ``ds_id`` comes from counters that live for the whole process, so a rank that built more ZeRO-3 modules or
+    parameters earlier numbers the same model differently. An engine numbers its own modules and parameters by
+    position once, in ``positions`` (from ``ds_id`` to position), and ranks compare those. An object the engine did
+    not number, such as an external parameter from outside its module, is compared by its ``ds_id``, made negative
+    so that it cannot equal a position.
+    """
+    if positions is None:
+        return [obj.ds_id for obj in objects]
+    return [positions.get(obj.ds_id, -1 - obj.ds_id) for obj in objects]
+
+
+def _highest_disagreeing_rank(disagrees: bool) -> int:
+    """The highest rank on which ``disagrees`` is true, or -1. Every rank must call it.
+
+    Only a rank whose list differs from rank0's can tell, and if it raised alone, the other ranks would go on to
+    their next collective and wait there for it forever. So every rank learns of a disagreement and raises.
+    """
+    rank_tensor = torch.tensor(
+        dist.get_rank() if disagrees else -1,
+        dtype=int,
+        device=torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"])),
+        requires_grad=False,
+    )
+    dist.all_reduce(rank_tensor, op=dist.ReduceOp.MAX)
+    return rank_tensor.cpu().item()
+
+
 @instrument_w_nvtx
 def assert_lst_len_same_as_other_ranks(lst: List[int]) -> None:
     rank0_len_tensor = torch.tensor(
@@ -97,9 +127,13 @@ def assert_lst_len_same_as_other_ranks(lst: List[int]) -> None:
     local_list_length = len(lst)
     dist.broadcast(rank0_len_tensor, src=0, async_op=False)
     rank0_list_length = rank0_len_tensor.cpu().item()
+    disagreeing_rank = _highest_disagreeing_rank(rank0_list_length != local_list_length)
     if rank0_list_length != local_list_length:
         raise RuntimeError(f"Detected a disagreement on list length between rank0 and rank{dist.get_rank()}: "
                            f"\n rank0: {rank0_list_length} "
+                           f"\n rank{dist.get_rank()}: {local_list_length}")
+    if disagreeing_rank >= 0:
+        raise RuntimeError(f"Detected a disagreement on list length between rank0 and rank{disagreeing_rank}: "
                            f"\n rank{dist.get_rank()}: {local_list_length}")
 
 
@@ -130,10 +164,15 @@ def assert_ints_same_as_other_ranks(ints: List[int]) -> None:
     """
     assert_lst_len_same_as_other_ranks(ints)
     rank0_ints = get_lst_from_rank0(ints)
+    disagreeing_rank = _highest_disagreeing_rank(ints != rank0_ints)
     if ints != rank0_ints:
         raise RuntimeError(f"Detected a disagreement on list contents between rank0 and rank{dist.get_rank()}: "
                            f"\n list length: {len(ints)}"
                            f"\n rank0: {rank0_ints} "
+                           f"\n rank{dist.get_rank()}: {ints}")
+    if disagreeing_rank >= 0:
+        raise RuntimeError(f"Detected a disagreement on list contents between rank0 and rank{disagreeing_rank}: "
+                           f"\n list length: {len(ints)}"
                            f"\n rank{dist.get_rank()}: {ints}")
 
 

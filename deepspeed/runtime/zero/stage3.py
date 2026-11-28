@@ -33,7 +33,8 @@ from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 import deepspeed.runtime.zenflow.engine_stage3 as zf_engine_stage3
-from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_mapping_to_flat_buffer, defragment, get_norm_dtype
+from deepspeed.runtime.zero.utils import (ZeRORuntimeException, agreement_ids, get_mapping_to_flat_buffer, defragment,
+                                          get_norm_dtype)
 from deepspeed.runtime.zero.offload_states import (offload_adam_states, reload_adam_states,
                                                    unpin_offloaded_optimizer_states)
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -1894,7 +1895,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         with get_accelerator().stream(self.reduce_and_partition_stream):
             if self.enable_sanity_checks:
-                assert_ints_same_as_other_ranks([p.ds_id for p in params_in_bucket])
+                # Positions can agree while ranks number the same parameters in another order, and the
+                # reduce-scatter below sorts the bucket by ds_id, so ranks compare that order too.
+                positions = self.parameter_offload.param_positions
+                by_ds_id = sorted(params_in_bucket, key=lambda p: p.ds_id)
+                assert_ints_same_as_other_ranks(
+                    agreement_ids(params_in_bucket, positions) + agreement_ids(by_ds_id, positions))
 
             if self.contiguous_gradients and bucket.elements <= self._ipg_bucket_capacity(
                     bucket) and not self.reduce_scatter:
