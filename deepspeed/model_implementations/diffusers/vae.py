@@ -5,7 +5,7 @@
 
 import torch
 from deepspeed.accelerator import get_accelerator
-from ..features.cuda_graph import CUDAGraph
+from ..features.cuda_graph import CUDAGraph, refresh_static_tensors
 
 
 class DSVAE(CUDAGraph, torch.nn.Module):
@@ -22,12 +22,8 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         self.all_cuda_graph_created = False
 
     def _graph_replay_decoder(self, *inputs, **kwargs):
-        for i in range(len(inputs)):
-            if torch.is_tensor(inputs[i]):
-                self.static_decoder_inputs[i].copy_(inputs[i])
-        for k in kwargs:
-            if torch.is_tensor(kwargs[k]):
-                self.static_decoder_kwargs[k].copy_(kwargs[k])
+        refresh_static_tensors(self.static_decoder_inputs, inputs)
+        refresh_static_tensors(self.static_decoder_kwargs, kwargs)
         get_accelerator().replay_graph(self._decoder_cuda_graph)
         return self.static_decoder_output
 
@@ -65,12 +61,8 @@ class DSVAE(CUDAGraph, torch.nn.Module):
             return self._decode(*inputs, **kwargs)
 
     def _graph_replay_encoder(self, *inputs, **kwargs):
-        for i in range(len(inputs)):
-            if torch.is_tensor(inputs[i]):
-                self.static_encoder_inputs[i].copy_(inputs[i])
-        for k in kwargs:
-            if torch.is_tensor(kwargs[k]):
-                self.static_encoder_kwargs[k].copy_(kwargs[k])
+        refresh_static_tensors(self.static_encoder_inputs, inputs)
+        refresh_static_tensors(self.static_encoder_kwargs, kwargs)
         get_accelerator().replay_graph(self._encoder_cuda_graph)
         return self.static_encoder_output
 
@@ -108,12 +100,8 @@ class DSVAE(CUDAGraph, torch.nn.Module):
             return self._encode(*inputs, **kwargs)
 
     def _graph_replay(self, *inputs, **kwargs):
-        for i in range(len(inputs)):
-            if torch.is_tensor(inputs[i]):
-                self.static_inputs[i].copy_(inputs[i])
-        for k in kwargs:
-            if torch.is_tensor(kwargs[k]):
-                self.static_kwargs[k].copy_(kwargs[k])
+        refresh_static_tensors(self.static_inputs, inputs)
+        refresh_static_tensors(self.static_kwargs, kwargs)
         get_accelerator().replay_graph(self._all_cuda_graph)
         return self.static_output
 
