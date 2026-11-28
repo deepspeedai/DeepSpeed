@@ -1057,6 +1057,7 @@ def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, m
     Returns:
         float: the global norm
     """
+    input_tensors = list(input_tensors)
     if global_norm is None:
         global_norm = get_global_norm_of_tensors(input_tensors, mpu=mpu)
     clip_coef = max_norm / (global_norm + eps)
