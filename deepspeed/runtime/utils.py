@@ -1303,8 +1303,10 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
                     return False
                 continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
-                val1 = val1.to(torch.device(get_accelerator().current_device_name()))
-                val2 = val2.to(torch.device(get_accelerator().current_device_name()))
+                # torch.equal rejects tensors on different devices, so only move the remote
+                # side, and only when it differs from where the local side lives.
+                if val1.device != val2.device:
+                    val2 = val2.to(val1.device)
                 if not torch.equal(val1, val2):
                     return False
             elif val1 != val2:
@@ -1321,8 +1323,10 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
                     return False
                 continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
-                val1 = val1.to(torch.device(get_accelerator().current_device_name()))
-                val2 = val2.to(torch.device(get_accelerator().current_device_name()))
+                # torch.equal rejects tensors on different devices, so only move the remote
+                # side, and only when it differs from where the local side lives.
+                if val1.device != val2.device:
+                    val2 = val2.to(val1.device)
                 if not torch.equal(val1, val2):
                     return False
             elif val1 != val2:
