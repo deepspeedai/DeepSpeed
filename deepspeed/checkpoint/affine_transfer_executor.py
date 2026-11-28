@@ -42,11 +42,14 @@ no custom kernels: those all change the schedule, which is the last thing a firs
 mover should be perturbing.
 """
 
+import contextlib
+import gc
+import hashlib
 import sys
 import zlib
 from bisect import bisect_right
 from dataclasses import dataclass
-from itertools import product
+from itertools import count, product
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
@@ -57,7 +60,8 @@ from .affine_transfer import TransferPlan, TransferSegment
 
 __all__ = [
     'AffineTransferExecutionError', 'TransferEndpoints', 'StagingBudget', 'TransferStats', 'TransferRequest',
-    'plan_digest', 'execute_transfer', 'execute_transfers', 'ScheduledRound', 'ProcessSchedule', 'schedule_transfers'
+    'plan_digest', 'execute_transfer', 'execute_transfers', 'prepare_transfers', 'PreparedTransfer', 'ScheduledRound',
+    'ProcessSchedule', 'schedule_transfers'
 ]
 
 
@@ -457,7 +461,7 @@ class ScheduledRound:
 
 @dataclass(frozen=True)
 class ProcessSchedule:
-    """What one process does for a batch, exactly as ``execute_transfers`` runs it.
+    """What one process does for a batch, exactly as ``execute_transfers`` or a prepared transfer runs it.
 
     ``sends`` and ``receives`` map each peer to its rounds in order. ``send_arena_elements`` and
     ``receive_arena_elements`` give the staging arena, in elements, that each peer direction
@@ -539,9 +543,66 @@ def execute_transfers(requests: Sequence[TransferRequest],
     Each direction stages at most ``bytes_per_peer`` per active peer. All requests and staging
     allocations are checked before payload, including read/write aliases between parameters.
     The caller stream's final unpack and local copies complete before this function returns.
+    A batch moved repeatedly can be prepared once with ``prepare_transfers`` instead.
+    """
+    agreed = _agree(requests, endpoints, dtype, budget, group, keep=False)
+    lane = agreed.lane
+    # Nothing outlives this call, so each round's views are built when the move reaches it, while the
+    # round before may still be in flight, instead of all of them before the first byte moves.
+    rounds = _round_views(lane, agreed.recv_arenas, agreed.send_arenas, requests, dtype)
+    local_copies = _local_copy_views(agreed.copies, requests, dtype)
+    sent, received, copied = _run_rounds(rounds, _round_count(lane), local_copies, group, agreed.element_size,
+                                         agreed.stream_ordered)
+    return TransferStats(agreed.segments, agreed.chunks, _round_count(lane), copied, sent, received)
+
+
+@dataclass(frozen=True)
+class _StagedRound:
+    """One peer's message in one round, and the copies that fill or empty it."""
+    peer: int
+    # What goes on the wire: a slice of the peer's arena, or the region itself when it is sent in place.
+    payload: torch.Tensor
+    # ``(destination, source)`` view pairs: packs into the arena before a send, unpacks after a receive.
+    # Empty when the round is sent or received in place.
+    copies: Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
+
+
+@dataclass
+class _Agreement:
+    """A batch every process agreed to move, and this process's share of it."""
+    lane: Optional[_Lane]
+    # The lane's local copies, less those dropped as in place.
+    copies: List[Tuple[int, _Operation]]
+    recv_arenas: Dict[int, torch.Tensor]
+    send_arenas: Dict[int, torch.Tensor]
+    # Built before the agreement only when a prepared handle keeps them.
+    rounds: List[Tuple[List[_StagedRound], List[_StagedRound]]]
+    local_copies: Tuple[Tuple[torch.Tensor, torch.Tensor, int], ...]
+    layout: Tuple
+    segments: int
+    chunks: int
+    element_size: int
+    identity: int
+    world_size: int
+    device: torch.device
+    stream_ordered: bool
+
+
+# This process's preparations so far. Two batches prepared alike share a digest, so what tells their
+# handles apart is which call prepared them on each process.
+_preparations = count()
+
+
+def _agree(requests: Sequence[TransferRequest], endpoints: TransferEndpoints, dtype: torch.dtype,
+           budget: StagingBudget, group: Optional[object], keep: bool) -> _Agreement:
+    """Validate a batch, lay out this process's share and agree on it with every process.
+
+    Collective. With ``keep``, the views a prepared handle keeps are built here too, before the
+    agreement, so a process that cannot build them refuses on every process.
     """
     import deepspeed.comm as dist
 
+    preparation = next(_preparations)
     initialized = dist.is_initialized()
     if initialized and group is not None and callable(getattr(group, 'rank', None)):
         # Ask the group itself: a weight-update group built outside the default world (as trainer <-> engine
@@ -553,10 +614,9 @@ def execute_transfers(requests: Sequence[TransferRequest],
     device = torch.device(get_accelerator().current_device_name()) if initialized else torch.device('cpu')
     # Without a process group every buffer is on the host, whatever the accelerator is.
     stream_ordered = initialized and not get_accelerator().is_synchronized_device()
-    indexed, local_copies = [], []
-    recv_rounds, send_rounds, recv_arenas, send_arenas = {}, {}, {}, {}
-    recv_direct, send_direct = {}, {}
-    digest, rejected = 0, 0
+    lane, copies, recv_arenas, send_arenas = None, [], {}, {}
+    indexed, rounds, local_copies, layout = [], [], (), ()
+    element_size, digest, rejected = 0, 0, 0
     error = None
     try:
         element_size = torch.empty((), dtype=dtype).element_size()
@@ -592,79 +652,189 @@ def execute_transfers(requests: Sequence[TransferRequest],
                        tuple((request.key, digests[id(request.plan)]) for request in requests))
         digest = zlib.crc32(repr(fingerprint).encode())
         # The same computation as schedule_transfers, so what it reports is what runs here.
-        lane = _lanes(indexed, [rank], budget.bytes_per_peer // element_size)[rank]
-        local_copies, recv_rounds, send_rounds = lane.local_copies, lane.recv_rounds, lane.send_rounds
-        if aliased:
-            local_copies = _validate_aliases(requests, lane, element_size)
-        recv_direct = {
-            peer: [
-                _direct_payload(entries, requests, dtype, False) if direct else None
-                for (entries, _), direct in zip(rounds, lane.recv_direct[peer])
-            ]
-            for peer, rounds in recv_rounds.items()
-        }
-        send_direct = {
-            peer: [
-                _direct_payload(entries, requests, dtype, True) if direct else None
-                for (entries, _), direct in zip(rounds, lane.send_direct[peer])
-            ]
-            for peer, rounds in send_rounds.items()
-        }
-        recv_arenas = {peer: torch.empty(size, dtype=dtype, device=device) for peer, size in lane.recv_arena.items()}
-        send_arenas = {peer: torch.empty(size, dtype=dtype, device=device) for peer, size in lane.send_arena.items()}
+        paused = _collector_paused() if keep else contextlib.nullcontext()
+        with paused:
+            lane = _lanes(indexed, [rank], budget.bytes_per_peer // element_size)[rank]
+            # A local copy whose source and target are the same memory moves nothing. It is dropped here,
+            # before the agreement, for a one-shot move and for every run of a prepared handle.
+            copies = _validate_aliases(requests, lane, element_size) if aliased else lane.local_copies
+            recv_arenas = {
+                peer: torch.empty(size, dtype=dtype, device=device)
+                for peer, size in lane.recv_arena.items()
+            }
+            send_arenas = {
+                peer: torch.empty(size, dtype=dtype, device=device)
+                for peer, size in lane.send_arena.items()
+            }
+            if keep:
+                rounds = list(_round_views(lane, recv_arenas, send_arenas, requests, dtype))
+                local_copies = tuple(_local_copy_views(copies, requests, dtype))
+                layout = _buffer_layout(requests)
     except (ValueError, TypeError, KeyError, AttributeError, RuntimeError, OverflowError, MemoryError) as caught:
         error = caught
         rejected = 1
-        recv_arenas, send_arenas = {}, {}
+        recv_arenas, send_arenas, rounds = {}, {}, []
         print(f'[transfer] rank {rank} rejected the batch: {caught}', file=sys.stderr, flush=True)
 
+    preparations = [preparation]
     # Invalid metadata must not be inspected again while constructing the agreement payload.
     if world_size > 1:
-        local = torch.tensor([digest, rejected], dtype=torch.int64, device=device)
-        seen = torch.empty((world_size, 2), dtype=torch.int64, device=device)
+        local = torch.tensor([digest, rejected, preparation], dtype=torch.int64, device=device)
+        seen = torch.empty((world_size, 3), dtype=torch.int64, device=device)
         dist.all_gather(list(seen.unbind(0)), local, group=group)
         # Read the complete decision once instead of synchronizing each rank's scalar separately.
         decisions = seen.cpu().tolist()
-        if any(pair[1] for pair in decisions):
+        if any(row[1] for row in decisions):
             raise AffineTransferExecutionError(
                 'a rank rejected the transfer batch before it began; no data moved') from error
-        if len({pair[0] for pair in decisions}) != 1:
+        if len({row[0] for row in decisions}) != 1:
             raise AffineTransferExecutionError('ranks disagree about the transfer schedule (batch schedule)')
+        preparations = [row[2] for row in decisions]
     elif rejected:
         raise AffineTransferExecutionError(f'the transfer batch was rejected before data moved: {error}') from error
 
-    rounds = max((len(value) for value in list(recv_rounds.values()) + list(send_rounds.values())), default=0)
+    return _Agreement(lane=lane,
+                      copies=copies,
+                      recv_arenas=recv_arenas,
+                      send_arenas=send_arenas,
+                      rounds=rounds,
+                      local_copies=local_copies,
+                      layout=layout,
+                      segments=sum(len(request.plan.segments) for request in requests),
+                      chunks=len(indexed),
+                      element_size=element_size,
+                      identity=_identity(digest, preparations),
+                      world_size=world_size,
+                      device=device,
+                      stream_ordered=stream_ordered)
+
+
+def _identity(digest: int, preparations: Sequence[int]) -> int:
+    """One preparation, named the same way on every process: its digest and each process's call count."""
+    hashed = hashlib.blake2b(repr((digest, tuple(preparations))).encode(), digest_size=8).digest()
+    # Shifted to fit the signed 64-bit element that carries it in run's check.
+    return int.from_bytes(hashed, 'little') >> 1
+
+
+@torch.no_grad()
+def prepare_transfers(requests: Sequence[TransferRequest],
+                      endpoints: TransferEndpoints,
+                      dtype: torch.dtype,
+                      budget: StagingBudget = StagingBudget(),
+                      group: Optional[object] = None) -> 'PreparedTransfer':
+    """Everything ``execute_transfers`` does before data moves, done once for repeated runs.
+
+    Collective, with the same preflight and refusal contract as ``execute_transfers``. The handle keeps
+    the requests' buffers, the staging arenas and a view of every region each round packs, unpacks or
+    copies locally, so ``PreparedTransfer.run`` only moves data. The buffers must stay where they are,
+    and every process must run the handle the same number of times; ``run`` checks both by default.
+    """
+    agreed = _agree(requests, endpoints, dtype, budget, group, keep=True)
+    return PreparedTransfer(_requests=tuple(requests),
+                            _layout=agreed.layout,
+                            _rounds=agreed.rounds,
+                            _local_copies=agreed.local_copies,
+                            _segments=agreed.segments,
+                            _chunks=agreed.chunks,
+                            _element_size=agreed.element_size,
+                            _identity=agreed.identity,
+                            _group=group,
+                            _world_size=agreed.world_size,
+                            _device=agreed.device,
+                            _stream_ordered=agreed.stream_ordered)
+
+
+@dataclass(eq=False)
+class PreparedTransfer:
+    """A batch validated, agreed and laid out by ``prepare_transfers``; ``run`` only moves data.
+
+    The handle holds the requests' buffers and views into them, so their storage stays allocated while
+    the handle lives: drop it before ZeRO-3 ``offload_states`` if that memory should be freed, and
+    prepare again after ``reload_states``. A buffer that moves to new storage would leave the views
+    writing into the old one, so ``run`` checks first by default, but only the tensors it is shown. A
+    view such as ``zero_param_storage_shard`` returns keeps its old storage when the partition behind it
+    is re-pointed, so pass views like it rebuilt from the live state, as ``run(requests)``.
+    """
+    _requests: Tuple[TransferRequest, ...]
+    _layout: Tuple
+    # Per round: the receives, then the sends, each ordered by peer.
+    _rounds: List[Tuple[List[_StagedRound], List[_StagedRound]]]
+    # ``(target region, source region, bytes)`` for each copy that stays on this process.
+    _local_copies: Tuple[Tuple[torch.Tensor, torch.Tensor, int], ...]
+    _segments: int
+    _chunks: int
+    _element_size: int
+    # Differs between any two prepare_transfers calls, even for the same batch; see _preparations.
+    _identity: int
+    _group: Optional[object]
+    _world_size: int
+    _device: torch.device
+    _stream_ordered: bool
+    _runs: int = 0
+
+    @torch.no_grad()
+    def run(self, requests: Optional[Sequence[TransferRequest]] = None, *, check: bool = True) -> TransferStats:
+        """Move the batch again from the buffers' current contents. Collective; synchronous on return.
+
+        With ``check`` (the default), every process first compares its buffers with what it prepared:
+        ``requests``, rebuilt from the live state such as fresh ``zero_param_storage_shard`` views, or
+        else the tensors the handle holds, which catches a buffer re-pointed in place (``.data = ...``).
+        One small all-gather then refuses, on every process and before any data moves, if a buffer
+        moved or changed shape on any process, or if the processes are not running the same handle for
+        the same time. Prepare the batch again after a refusal. ``check=False`` skips that collective,
+        for a caller that already guarantees all three; every process must pass the same ``check``.
+        The aliases between buffers, and which local copies are dropped because their source and target
+        are the same memory, were decided at prepare too, so ``check=False`` cannot see that a moved
+        buffer changed them.
+        """
+        if check:
+            self._check(requests)
+        return self._move()
+
+    def _check(self, requests: Optional[Sequence[TransferRequest]]) -> None:
+        import deepspeed.comm as dist
+        try:
+            moved = int(_buffer_layout(self._requests if requests is None else requests) != self._layout)
+        except (AttributeError, TypeError, RuntimeError):
+            moved = 1
+        if self._world_size > 1:
+            # One process raising alone would leave its peers waiting in the transfer.
+            local = torch.tensor([self._identity, self._runs, moved], dtype=torch.int64, device=self._device)
+            seen = torch.empty((self._world_size, 3), dtype=torch.int64, device=self._device)
+            dist.all_gather(list(seen.unbind(0)), local, group=self._group)
+            decisions = seen.cpu().tolist()
+            if any(row[2] for row in decisions):
+                moved = 1
+            elif len({(row[0], row[1]) for row in decisions}) != 1:
+                raise AffineTransferExecutionError('processes are not running the same prepared transfer for the '
+                                                   'same time; no data moved')
+        if moved:
+            raise AffineTransferExecutionError('a buffer of the prepared transfer moved or changed since '
+                                               'prepare_transfers; prepare the batch again. No data moved.')
+
+    def _move(self) -> TransferStats:
+        sent, received, copied = _run_rounds(self._rounds, len(self._rounds), self._local_copies, self._group,
+                                             self._element_size, self._stream_ordered)
+        self._runs += 1
+        return TransferStats(self._segments, self._chunks, len(self._rounds), copied, sent, received)
+
+
+def _run_rounds(rounds, round_count: int, local_copies, group: Optional[object], element_size: int,
+                stream_ordered: bool) -> Tuple[int, int, int]:
+    """Move the rounds in order, then the local copies; returns the bytes sent, received and copied."""
+    import deepspeed.comm as dist
     sent = received = copied = 0
     pending = []
-
-    for round_index in range(rounds):
-        p2p = []
-        for peer, peer_rounds in sorted(recv_rounds.items()):
-            if round_index < len(peer_rounds):
-                payload = recv_direct[peer][round_index]
-                if payload is None:
-                    payload = recv_arenas[peer][:peer_rounds[round_index][1]]
-                p2p.append(('recv', payload, peer))
-        for peer, peer_rounds in sorted(send_rounds.items()):
-            if round_index >= len(peer_rounds):
-                continue
-            entries, count = peer_rounds[round_index]
-            payload = send_direct[peer][round_index]
-            if payload is None:
-                arena = send_arenas[peer]
-                for item, operation, offset in entries:
-                    source = _flat(operation.segment.source_rank, requests[item].source_buffers, dtype)
-                    arena[offset:offset + operation.elements].view(operation.chunk_shape).copy_(
-                        _region(source, operation.source_offset, operation.chunk_shape,
-                                operation.segment.source_strides))
-                payload = arena[:count]
-            sent += count * element_size
-            p2p.append(('send', payload, peer))
+    for round_index, (recvs, sends) in enumerate(rounds):
+        for staged in sends:
+            for destination, source in staged.copies:
+                destination.copy_(source)
+        p2p = [(dist.irecv, staged) for staged in recvs] + [(dist.isend, staged) for staged in sends]
         operations = [
-            dist.P2POp(dist.irecv if direction == 'recv' else dist.isend,
-                       buffer,
-                       dist.get_global_rank(group, peer) if group is not None else peer,
-                       group=group) for direction, buffer, peer in p2p
+            dist.P2POp(direction,
+                       staged.payload,
+                       dist.get_global_rank(group, staged.peer) if group is not None else staged.peer,
+                       group=group) for direction, staged in p2p
         ]
         if operations:
             for handle in dist.batch_isend_irecv(operations):
@@ -677,33 +847,103 @@ def execute_transfers(requests: Sequence[TransferRequest],
                     handle.wait()
         # Stream ordering already protects arena reuse. Bound retained handles while avoiding
         # a host polling delay after every small group of rounds; all errors are observed on return.
-        if (round_index + 1) % 32 == 0 or round_index + 1 == rounds:
+        if (round_index + 1) % 32 == 0 or round_index + 1 == round_count:
             for handle in pending:
                 handle.wait()
             pending.clear()
-        for peer, peer_rounds in recv_rounds.items():
-            if round_index >= len(peer_rounds):
-                continue
-            received += peer_rounds[round_index][1] * element_size
-            if recv_direct[peer][round_index] is not None:
-                continue
-            for item, operation, offset in peer_rounds[round_index][0]:
-                target = _flat(operation.segment.target_rank, requests[item].target_buffers, dtype)
-                payload = recv_arenas[peer][offset:offset + operation.elements].view(operation.chunk_shape)
-                _region(target, operation.target_offset, operation.chunk_shape,
-                        operation.segment.target_strides).copy_(payload)
+        sent += sum(staged.payload.numel() for staged in sends) * element_size
+        received += sum(staged.payload.numel() for staged in recvs) * element_size
+        for staged in recvs:
+            for destination, source in staged.copies:
+                destination.copy_(source)
 
-    for item, operation in local_copies:
-        source = _flat(operation.segment.source_rank, requests[item].source_buffers, dtype)
-        target = _flat(operation.segment.target_rank, requests[item].target_buffers, dtype)
-        _region(target, operation.target_offset, operation.chunk_shape, operation.segment.target_strides).copy_(
-            _region(source, operation.source_offset, operation.chunk_shape, operation.segment.source_strides))
-        copied += operation.payload_bytes
+    for target, source, size in local_copies:
+        target.copy_(source)
+        copied += size
 
     if stream_ordered:
         get_accelerator().current_stream().synchronize()
-    return TransferStats(sum(len(request.plan.segments) for request in requests), len(indexed), rounds, copied, sent,
-                         received)
+    return sent, received, copied
+
+
+@contextlib.contextmanager
+def _collector_paused():
+    """Pause Python's cyclic garbage collector while a batch's views are built.
+
+    Tens of thousands of views and tuples stay alive together there, and every collection their
+    allocation triggers walks them all again: at 8 processes on CPU that was a third of a one-shot
+    ``execute_transfers``. They hold no reference cycles, so there is nothing for it to collect.
+    """
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+
+
+def _operation_region(requests, item, operation, dtype, source: bool) -> torch.Tensor:
+    """One operation's region in its source or target buffer, as a view."""
+    segment = operation.segment
+    if source:
+        flat = _flat(segment.source_rank, requests[item].source_buffers, dtype)
+        return _region(flat, operation.source_offset, operation.chunk_shape, segment.source_strides)
+    flat = _flat(segment.target_rank, requests[item].target_buffers, dtype)
+    return _region(flat, operation.target_offset, operation.chunk_shape, segment.target_strides)
+
+
+def _round_count(lane: _Lane) -> int:
+    return max((len(rounds) for rounds in list(lane.recv_rounds.values()) + list(lane.send_rounds.values())),
+               default=0)
+
+
+def _round_views(lane: _Lane, recv_arenas, send_arenas, requests, dtype):
+    """Each round's receives, then its sends, ordered by peer, as wire payloads and the copies around them."""
+    for index in range(_round_count(lane)):
+        recvs, sends = [], []
+        for peer, peer_rounds in sorted(lane.recv_rounds.items()):
+            if index < len(peer_rounds):
+                direct, arena = lane.recv_direct[peer][index], recv_arenas.get(peer)
+                recvs.append(_staged_round(peer, peer_rounds[index], direct, arena, requests, dtype, source=False))
+        for peer, peer_rounds in sorted(lane.send_rounds.items()):
+            if index < len(peer_rounds):
+                direct, arena = lane.send_direct[peer][index], send_arenas.get(peer)
+                sends.append(_staged_round(peer, peer_rounds[index], direct, arena, requests, dtype, source=True))
+        yield recvs, sends
+
+
+def _staged_round(peer, peer_round, direct, arena, requests, dtype, source: bool) -> _StagedRound:
+    """One peer's message in one direction, resolved to its wire payload and the copies around it."""
+    entries, elements = peer_round
+    if direct:
+        return _StagedRound(peer, _direct_payload(entries, requests, dtype, source), ())
+    copies = []
+    for item, operation, offset in entries:
+        slot = arena[offset:offset + operation.elements].view(operation.chunk_shape)
+        region = _operation_region(requests, item, operation, dtype, source)
+        copies.append((slot, region) if source else (region, slot))
+    return _StagedRound(peer, arena[:elements], tuple(copies))
+
+
+def _local_copy_views(copies: Sequence[Tuple[int, _Operation]], requests, dtype):
+    """``(target region, source region, bytes)`` for each copy that stays on this process."""
+    for item, operation in copies:
+        target = _operation_region(requests, item, operation, dtype, source=False)
+        source = _operation_region(requests, item, operation, dtype, source=True)
+        yield target, source, operation.payload_bytes
+
+
+def _buffer_layout(requests: Sequence[TransferRequest]) -> Tuple:
+    """Where each request's local buffers are, and under which plan; a moved buffer changes it."""
+    layout = []
+    for request in requests:
+        for side, buffers in (('source', request.source_buffers), ('target', request.target_buffers)):
+            for location in sorted(buffers):
+                buffer = buffers[location]
+                layout.append((request.key, request.plan, side, location, buffer.data_ptr(), tuple(buffer.shape),
+                               buffer.stride(), buffer.dtype, buffer.device, buffer.is_conj(), buffer.is_neg()))
+    return tuple(layout)
 
 
 def _data_range(buffer: torch.Tensor) -> Tuple[int, int]:
