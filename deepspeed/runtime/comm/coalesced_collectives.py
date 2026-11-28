@@ -88,12 +88,15 @@ def reduce_scatter_coalesced(
     efficiently than individual reduce scatter calls
     TODO. see if PyTorch team wants a c++ version of this for ProcessGroupNCCL
     """
+    if not tensors:
+        return []
+
     this_rank = dist.get_rank(group)
     world_sz = dist.get_world_size(group)
 
     partition_lst_for_each_tensor = [None] * len(tensors)
     for tensor_idx, tensor in enumerate(tensors):
-        flattened_tensor = tensor.view(-1)
+        flattened_tensor = tensor.contiguous().view(-1)
         chunk_sz = math.ceil(tensor.numel() / world_sz)
         partition_lst_for_each_tensor[tensor_idx] = [
             flattened_tensor[rank * chunk_sz:rank * chunk_sz + chunk_sz] for rank in range(0, world_sz)
@@ -104,7 +107,7 @@ def reduce_scatter_coalesced(
     if len(tensors) == 1 and tensors[0].numel() % world_sz == 0:
         # if there's only one tensor being reduced and we don't need to pad
         # we have an opportunity to avoid a memory allocation
-        tensor_partition_flat_buffer = tensors[0].view(-1)
+        tensor_partition_flat_buffer = flattened_tensor
     else:
         # interleave tensor partitions such that the correct reduced partitions of each tensor
         # end up at each rank
@@ -119,7 +122,7 @@ def reduce_scatter_coalesced(
                 padding_sz = padded_partition_sz_for_each_tensor[tensor_idx] - tensor_chunk.numel()
                 if padding_sz > 0:
                     tensor_partitions_lst_with_padding.append(
-                        torch.empty(padding_sz, dtype=tensor_chunk.dtype, device=tensor_chunk.device))
+                        torch.zeros(padding_sz, dtype=tensor_chunk.dtype, device=tensor_chunk.device))
 
         tensor_partition_flat_buffer = instrument_w_nvtx(torch.cat)(tensor_partitions_lst_with_padding)
 
