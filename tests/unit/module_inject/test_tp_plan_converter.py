@@ -177,3 +177,302 @@ class TestTPPlanConverter:
 
         assert colwise_count == 4  # qkv + Wq/Wk/Wv
         assert rowwise_count == 1  # out_proj
+
+    def test_supplement_replicated_qk_norm_without_model(self):
+        """When column-wise q_proj and k_proj are specified without a model,
+        q_norm and k_norm are supplemented as replicated_with_grad_allreduce."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "layers.*.self_attn.v_proj": "colwise",
+            "layers.*.self_attn.o_proj": "rowwise",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert supplemented["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert supplemented["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+        assert len(supplemented) == 6
+
+    def test_supplement_replicated_qk_norm_preserves_existing(self):
+        """Existing q_norm/k_norm entries in the plan are preserved without duplication."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "layers.*.self_attn.q_norm": "replicated_with_grad_allreduce",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert supplemented["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert supplemented["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+        assert len(supplemented) == 4
+
+    def test_supplement_replicated_qk_norm_with_model_without_norm(self):
+        """When a model is supplied that has no q_norm or k_norm parameters (like LLaMA),
+        no unnecessary norm specs are added."""
+        import torch.nn as nn
+
+        class DummyModel(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([
+                    nn.ModuleDict({
+                        "self_attn":
+                        nn.ModuleDict({
+                            "q_proj": nn.Linear(32, 32),
+                            "k_proj": nn.Linear(32, 32),
+                            "o_proj": nn.Linear(32, 32),
+                        })
+                    })
+                ])
+
+        model = DummyModel()
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "layers.*.self_attn.o_proj": "rowwise",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan), model=model)
+        assert "layers.*.self_attn.q_norm" not in supplemented
+        assert "layers.*.self_attn.k_norm" not in supplemented
+        assert len(supplemented) == 3
+
+    def test_supplement_replicated_qk_norm_ignores_gathered_projections(self):
+        """Projections using colwise_rep or colwise_gather_output already compute full gradients
+        and must not supplement grad_allreduce hooks."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise_gather_output",
+            "layers.*.self_attn.k_proj": "colwise_rep",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert "layers.*.self_attn.q_norm" not in supplemented
+        assert "layers.*.self_attn.k_norm" not in supplemented
+        assert len(supplemented) == 2
+
+    def test_supplement_replicated_qk_norm_independent_projections(self):
+        """Only projections that are column-sharded supplement their matching norm."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "rowwise",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert supplemented.get("layers.*.self_attn.q_norm") == "replicated_with_grad_allreduce"
+        assert "layers.*.self_attn.k_norm" not in supplemented
+
+    def test_supplement_replicated_qk_norm_skips_model_without_named_parameters(self):
+        """A supplied model fixture without named_parameters is not assumed to have norms."""
+
+        class MockModelWithoutParams:
+            pass
+
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan), model=MockModelWithoutParams())
+        assert "layers.*.self_attn.q_norm" not in supplemented
+        assert "layers.*.self_attn.k_norm" not in supplemented
+        assert len(supplemented) == 2
+
+    def test_get_hf_tp_plan_supplements_older_transformers_qwen3(self):
+        """Simulate transformers < 5.3 where base_model_tp_plan lacks q_norm/k_norm.
+        _get_hf_tp_plan should supplement them, and TPPlanConverter should mark them
+        as PartitionType.SKIP with grad_allreduce=True."""
+        import torch.nn as nn
+        from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
+
+        class MockQwen3Config:
+            base_model_tp_plan = {
+                "layers.*.self_attn.q_proj": "colwise",
+                "layers.*.self_attn.k_proj": "colwise",
+                "layers.*.self_attn.v_proj": "colwise",
+                "layers.*.self_attn.o_proj": "rowwise",
+                "layers.*.mlp.gate_proj": "colwise",
+                "layers.*.mlp.up_proj": "colwise",
+                "layers.*.mlp.down_proj": "rowwise",
+            }
+
+        class MockQwen3Attention(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.q_proj = nn.Linear(32, 32)
+                self.k_proj = nn.Linear(32, 32)
+                self.v_proj = nn.Linear(32, 32)
+                self.o_proj = nn.Linear(32, 32)
+                self.q_norm = nn.LayerNorm(32)
+                self.k_norm = nn.LayerNorm(32)
+
+        class MockQwen3Model(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.config = MockQwen3Config()
+                self.layers = nn.ModuleList([
+                    nn.ModuleDict({
+                        "self_attn":
+                        MockQwen3Attention(),
+                        "mlp":
+                        nn.ModuleDict({
+                            "gate_proj": nn.Linear(32, 64),
+                            "up_proj": nn.Linear(32, 64),
+                            "down_proj": nn.Linear(64, 32),
+                        }),
+                    })
+                ])
+
+        model = MockQwen3Model()
+        plan = _get_hf_tp_plan(model)
+        assert plan is not None
+        assert plan["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert plan["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+
+        specs = TPPlanConverter.convert(plan)
+        q_norm_spec = [s for s in specs if "q_norm" in s.patterns[0]][0]
+        k_norm_spec = [s for s in specs if "k_norm" in s.patterns[0]][0]
+
+        assert q_norm_spec.partition_type == PartitionType.SKIP
+        assert q_norm_spec.grad_allreduce is True
+        assert k_norm_spec.partition_type == PartitionType.SKIP
+        assert k_norm_spec.grad_allreduce is True
+
+    def test_replicated_style_converts_to_skip_without_grad_allreduce(self):
+        """'replicated' style converts to PartitionType.SKIP with grad_allreduce=False."""
+        plan = {"layers.*.self_attn.q_norm": "replicated"}
+        specs = TPPlanConverter.convert(plan)
+        assert len(specs) == 1
+        assert specs[0].partition_type == PartitionType.SKIP
+        assert specs[0].grad_allreduce is False
+        assert specs[0].gather_output is False
+
+    def test_layer_specific_gathered_override_supplements_replicated_norm(self):
+        """When a layer-specific colwise_gather_output rule overrides a wildcard colwise rule,
+        the overridden layer's norm is supplemented as 'replicated' (grad_allreduce=False),
+        while other layers matching the wildcard receive grad_allreduce=True."""
+        import torch.nn as nn
+        from deepspeed.module_inject.autotp_config import AutoTPConfig
+
+        class MockAttention(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.q_proj = nn.Linear(32, 32)
+                self.k_proj = nn.Linear(32, 32)
+                self.q_norm = nn.LayerNorm(32)
+                self.k_norm = nn.LayerNorm(32)
+
+        class MockModel(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([
+                    nn.ModuleDict({"self_attn": MockAttention()}),
+                    nn.ModuleDict({"self_attn": MockAttention()}),
+                ])
+
+        model = MockModel()
+
+        # Plan with layer 0 colwise_gather_output override and wildcard colwise fallback
+        hf_plan = {
+            "layers.0.self_attn.q_proj": "colwise_gather_output",
+            "layers.0.self_attn.k_proj": "colwise_gather_output",
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+        }
+
+        # Test without model
+        supp_no_model = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert supp_no_model["layers.0.self_attn.q_norm"] == "replicated"
+        assert supp_no_model["layers.0.self_attn.k_norm"] == "replicated"
+        assert supp_no_model["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert supp_no_model["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+
+        specs_no_model = TPPlanConverter.convert(supp_no_model)
+        config_no_model = AutoTPConfig(layer_specs=specs_no_model)
+        # Layer 0 norm must match the specific 'replicated' rule (grad_allreduce=False)
+        spec_q0 = config_no_model.find_matching_spec("layers.0.self_attn.q_norm.weight")
+        assert spec_q0 is not None
+        assert spec_q0.grad_allreduce is False
+        # Layer 1 norm must match the wildcard 'replicated_with_grad_allreduce' rule (grad_allreduce=True)
+        spec_q1 = config_no_model.find_matching_spec("layers.1.self_attn.q_norm.weight")
+        assert spec_q1 is not None
+        assert spec_q1.grad_allreduce is True
+
+        # Test with model
+        supp_model = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan), model=model)
+        assert supp_model["layers.0.self_attn.q_norm"] == "replicated"
+        assert supp_model["layers.0.self_attn.k_norm"] == "replicated"
+        assert supp_model["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert supp_model["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+
+        specs_model = TPPlanConverter.convert(supp_model, model=model)
+        config_model = AutoTPConfig(layer_specs=specs_model)
+        spec_m_q0 = config_model.find_matching_spec("layers.0.self_attn.q_norm.weight")
+        assert spec_m_q0 is not None
+        assert spec_m_q0.grad_allreduce is False
+        spec_m_q1 = config_model.find_matching_spec("layers.1.self_attn.q_norm.weight")
+        assert spec_m_q1 is not None
+        assert spec_m_q1.grad_allreduce is True
+
+    def test_qwen3_projection_order_preserved_when_adding_norms(self):
+        """Preserve existing projection rule order when adding norm rules (Qwen3 regression test).
+
+        When a plan has `layers.*.self_attn.q_proj: colwise` followed by
+        `self_attn.q_proj: colwise_gather_output`, the first rule must take precedence
+        so that projection outputs are not gathered and norm rules match with
+        replicated_with_grad_allreduce (grad_allreduce=True).
+        """
+        import torch.nn as nn
+        from deepspeed.module_inject.autotp_config import AutoTPConfig
+
+        class MockAttention(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.q_proj = nn.Linear(32, 32)
+                self.k_proj = nn.Linear(32, 32)
+                self.q_norm = nn.LayerNorm(32)
+                self.k_norm = nn.LayerNorm(32)
+
+        class MockModel(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([
+                    nn.ModuleDict({"self_attn": MockAttention()}),
+                    nn.ModuleDict({"self_attn": MockAttention()}),
+                ])
+
+        model = MockModel()
+
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "self_attn.q_proj": "colwise_gather_output",
+            "self_attn.k_proj": "colwise_gather_output",
+        }
+
+        # Test without model
+        supp_no_model = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        specs_no_model = TPPlanConverter.convert(supp_no_model)
+        config_no_model = AutoTPConfig(layer_specs=specs_no_model)
+        # Projection must use the first rule ('colwise', gather_output=False), keeping 4 heads
+        proj_spec = config_no_model.find_matching_spec("layers.0.self_attn.q_proj.weight")
+        assert proj_spec is not None
+        assert proj_spec.gather_output is False
+        assert proj_spec.partition_type == PartitionType.COLUMN
+        # Norm must use the matching first norm rule (grad_allreduce=True)
+        norm_spec = config_no_model.find_matching_spec("layers.0.self_attn.q_norm.weight")
+        assert norm_spec is not None
+        assert norm_spec.grad_allreduce is True
+        assert norm_spec.partition_type == PartitionType.SKIP
+
+        # Test with model
+        specs_model = TPPlanConverter.convert(dict(hf_plan), model=model)
+        config_model = AutoTPConfig(layer_specs=specs_model)
+        proj_spec_m = config_model.find_matching_spec("layers.0.self_attn.q_proj.weight")
+        assert proj_spec_m is not None
+        assert proj_spec_m.gather_output is False
+        assert proj_spec_m.partition_type == PartitionType.COLUMN
+        norm_spec_m = config_model.find_matching_spec("layers.0.self_attn.q_norm.weight")
+        assert norm_spec_m is not None
+        assert norm_spec_m.grad_allreduce is True
+        assert norm_spec_m.partition_type == PartitionType.SKIP

@@ -373,6 +373,15 @@ class TestReplicatedGradAllreduce(DistributedTest):
         torch.manual_seed(42)
         model = transformers.Qwen3ForCausalLM(config)
 
+        # Strip q_norm/k_norm from plan sources to ensure supplementation is exercised on transformers >= 5.3
+        if hasattr(config, "base_model_tp_plan") and isinstance(config.base_model_tp_plan, dict):
+            config.base_model_tp_plan = {
+                k: v
+                for k, v in config.base_model_tp_plan.items() if "q_norm" not in k and "k_norm" not in k
+            }
+        if hasattr(model, "_tp_plan") and isinstance(model._tp_plan, dict):
+            model._tp_plan = {k: v for k, v in model._tp_plan.items() if "q_norm" not in k and "k_norm" not in k}
+
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
             "optimizer": {
@@ -416,6 +425,81 @@ class TestReplicatedGradAllreduce(DistributedTest):
                 assert torch.allclose(gathered[0], other, atol=1e-6), \
                     f"gradient of {name} differs across tensor-parallel ranks"
 
+    def test_qwen3_norm_grads_match_one_process(self):
+        """The q/k norm gradients equal those of the same model on one process.
+
+        Comparing the ranks with each other does not catch a sum applied twice, since every rank then
+        holds the same doubled gradient, so the gradients are compared with a one-process reference.
+        """
+        import pytest
+        transformers = pytest.importorskip("transformers")
+        if not hasattr(transformers, "Qwen3ForCausalLM"):
+            pytest.skip("transformers build has no Qwen3")
+
+        config = transformers.Qwen3Config(vocab_size=256,
+                                          hidden_size=64,
+                                          intermediate_size=128,
+                                          num_hidden_layers=2,
+                                          num_attention_heads=8,
+                                          num_key_value_heads=8,
+                                          head_dim=8,
+                                          max_position_embeddings=64,
+                                          use_cache=False,
+                                          tie_word_embeddings=False)
+        config._attn_implementation = "sdpa"
+        torch.manual_seed(42)
+        model = transformers.Qwen3ForCausalLM(config)
+        reference = transformers.Qwen3ForCausalLM(config)
+        reference.load_state_dict(model.state_dict())
+
+        # Strip q_norm/k_norm from plan sources to ensure supplementation is exercised on transformers >= 5.3
+        if hasattr(config, "base_model_tp_plan") and isinstance(config.base_model_tp_plan, dict):
+            config.base_model_tp_plan = {
+                k: v
+                for k, v in config.base_model_tp_plan.items() if "q_norm" not in k and "k_norm" not in k
+            }
+        if hasattr(model, "_tp_plan") and isinstance(model._tp_plan, dict):
+            model._tp_plan = {k: v for k, v in model._tp_plan.items() if "q_norm" not in k and "k_norm" not in k}
+
+        device = torch.device(get_accelerator().current_device_name())
+        torch.manual_seed(1234)
+        input_ids = torch.randint(0, 256, (1, 16), device=device)
+
+        reference.to(device)
+        reference(input_ids=input_ids, use_cache=False).logits.float().pow(2).mean().backward()
+        expected_grads = {
+            name: param.grad
+            for name, param in reference.named_parameters() if "q_norm" in name or "k_norm" in name
+        }
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6,
+                    "torch_adam": True
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        logits = engine(input_ids=input_ids, use_cache=False).logits
+        engine.backward(logits.float().pow(2).mean())
+
+        norm_params = {name: param for name, param in engine.module.named_parameters() if name in expected_grads}
+        assert len(norm_params) == 2 * config.num_hidden_layers
+        for name, param in norm_params.items():
+            expected = expected_grads[name]
+            error = (param.grad - expected).abs().max().item()
+            assert error <= 1e-3 * expected.abs().max().item(), \
+                f"gradient of {name} differs from the one-process gradient by {error:.2e}"
+
     def test_frozen_qwen3_initializes_and_runs(self):
         """A frozen model, such as a distillation teacher, has no gradients to reduce.
 
@@ -440,6 +524,15 @@ class TestReplicatedGradAllreduce(DistributedTest):
         config._attn_implementation = "sdpa"
         torch.manual_seed(42)
         model = transformers.Qwen3ForCausalLM(config)
+
+        # Strip q_norm/k_norm from plan sources to ensure supplementation is exercised on transformers >= 5.3
+        if hasattr(config, "base_model_tp_plan") and isinstance(config.base_model_tp_plan, dict):
+            config.base_model_tp_plan = {
+                k: v
+                for k, v in config.base_model_tp_plan.items() if "q_norm" not in k and "k_norm" not in k
+            }
+        if hasattr(model, "_tp_plan") and isinstance(model._tp_plan, dict):
+            model._tp_plan = {k: v for k, v in model._tp_plan.items() if "q_norm" not in k and "k_norm" not in k}
         reference = transformers.Qwen3ForCausalLM(config)
         reference.load_state_dict(model.state_dict())
         model.requires_grad_(False)
@@ -487,6 +580,15 @@ class TestReplicatedGradAllreduce(DistributedTest):
         config._attn_implementation = "sdpa"
         torch.manual_seed(42)
         model = transformers.Qwen3ForCausalLM(config)
+
+        # Strip q_norm/k_norm from plan sources to ensure supplementation is exercised on transformers >= 5.3
+        if hasattr(config, "base_model_tp_plan") and isinstance(config.base_model_tp_plan, dict):
+            config.base_model_tp_plan = {
+                k: v
+                for k, v in config.base_model_tp_plan.items() if "q_norm" not in k and "k_norm" not in k
+            }
+        if hasattr(model, "_tp_plan") and isinstance(model._tp_plan, dict):
+            model._tp_plan = {k: v for k, v in model._tp_plan.items() if "q_norm" not in k and "k_norm" not in k}
         for layer in model.model.layers:
             layer.self_attn.q_norm.requires_grad_(False)
 
