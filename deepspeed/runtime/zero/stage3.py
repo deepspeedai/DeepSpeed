@@ -1887,8 +1887,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         with get_accelerator().stream(self.reduce_and_partition_stream):
             if self.enable_sanity_checks:
-                assert_ints_same_as_other_ranks(agreement_ids(params_in_bucket,
-                                                              self.parameter_offload.param_positions))
+                # Positions can agree while ranks number the same parameters in another order, and the
+                # reduce-scatter below sorts the bucket by ds_id, so ranks compare that order too.
+                positions = self.parameter_offload.param_positions
+                by_ds_id = sorted(params_in_bucket, key=lambda p: p.ds_id)
+                assert_ints_same_as_other_ranks(
+                    agreement_ids(params_in_bucket, positions) + agreement_ids(by_ds_id, positions))
 
             if self.contiguous_gradients and bucket.elements <= self._ipg_bucket_capacity(
                     bucket) and not self.reduce_scatter:

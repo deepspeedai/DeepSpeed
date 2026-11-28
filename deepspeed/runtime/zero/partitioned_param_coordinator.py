@@ -272,9 +272,12 @@ class PartitionedParameterCoordinator:
             if self.is_record_trace():
                 # Successfully recorded a trace
                 self.construct_parameter_trace_from_module_trace()
-                # Make sure that recorded parameter orders are identical across ranks
+                # Make sure that recorded parameter orders are identical across ranks. A fetch that gathers several
+                # modules' parameters at once sorts them by ds_id, so ranks compare that order too.
+                params = [p.param for p in self.__param_order]
+                by_ds_id = sorted(set(params), key=lambda p: p.ds_id)
                 assert_ints_same_as_other_ranks(
-                    agreement_ids([p.param for p in self.__param_order], self.__param_positions))
+                    agreement_ids(params, self.__param_positions) + agreement_ids(by_ds_id, self.__param_positions))
                 assert_ints_same_as_other_ranks([p.step_id_last_used_at for p in self.__param_order])
 
                 self.__submodule_order = tuple(self.__submodule_order)  # freeze
