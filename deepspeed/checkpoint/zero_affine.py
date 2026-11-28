@@ -277,6 +277,8 @@ def autotp_storage_affine_maps(model, optimizer_states=False, tp_group=None):
     ``2 * ndim - 1`` boxes; any other layout piece keeps one piece per row.
     """
     if tp_group is None:
+        tp_group = getattr(model, '_ds_autotp_group', None)
+    if tp_group is None:
         # The group the layers were sharded over, which an engine with groups of its own does not publish.
         from deepspeed.module_inject.layers import TensorParallel_Layer
         tp_group = next((module.mp_group for module in model.modules()

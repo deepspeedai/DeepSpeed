@@ -1043,6 +1043,8 @@ class DeepSpeedEngine(Module):
         replacement_sources = self._apply_autotp_partitioning(model, tp_config)
         if not hasattr(model, "ds_autotp_size"):
             setattr(model, "ds_autotp_size", self.autotp_size())
+        if not hasattr(model, "_ds_autotp_group"):
+            setattr(model, "_ds_autotp_group", self.mpu.get_tensor_model_parallel_group())
         return replacement_sources
 
     def _configure_tensor_parallel_states(self, model):
@@ -1059,14 +1061,12 @@ class DeepSpeedEngine(Module):
 
         # This engine's own TP/DP groups: another engine's groups passed as mpu, the process-wide ones when they
         # have its layout, else new ones (#9081).
-        if isinstance(self.mpu, groups.TensorParallelGroups) and self.mesh_device is None:
+        if isinstance(self.mpu, groups.TensorParallelGroups):
             tp_groups = self.mpu
         else:
             tp_groups = groups._get_or_create_tp_groups(tensor_model_parallel_size=self.autotp_size(),
                                                         process_wide=not groups._holds_explicit_mpu())
-        # With a data/sequence parallel mesh, the data parallel layout comes from the mesh, which the module
-        # getters read first.
-        self.mpu = groups if self.mesh_device is not None else tp_groups
+        self.mpu = tp_groups
 
         self.first_dataloader_check = None
 
@@ -1648,6 +1648,8 @@ class DeepSpeedEngine(Module):
         an earlier engine's Ulysses mpu, provides. Such an engine keeps inheriting groups.mpu."""
         if self._config._param_dict.get("sequence_parallel_size", 1) <= 1:
             return False
+        if groups._get_model_parallel_world_size() != 1:
+            return False
         get_sp_world_size = getattr(groups.mpu, "get_sequence_parallel_world_size", None)
         return get_sp_world_size is not None and get_sp_world_size() > 1
 
@@ -1664,6 +1666,10 @@ class DeepSpeedEngine(Module):
             raise ValueError(unsupported.format("AutoEP"))
         if self.is_deepcompile_enabled() and self.compile_autotp():
             raise ValueError(unsupported.format("the DeepCompile 'autotp' pass"))
+        if self.zero_hpz_partition_size() > 1:
+            raise ValueError(unsupported.format("hpZ"))
+        if self.zero_quantized_gradients():
+            raise ValueError(unsupported.format("quantized gradients"))
         # Expert groups are still built from the process-wide groups.
         from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
         if any(isinstance(module, (MoE, AutoEPMoELayer)) for module in model.modules()):
@@ -1673,17 +1679,21 @@ class DeepSpeedEngine(Module):
         """Whether this engine reads its TP/DP groups from its own TensorParallelGroups (#9081)."""
         return isinstance(self.mpu, groups.TensorParallelGroups)
 
-    def _tensor_parallel_groups(self):
-        return self.mpu if self._owns_parallel_groups() else groups
-
     def get_data_parallel_rank(self):
-        return self._tensor_parallel_groups().get_data_parallel_rank()
+        if self.mpu is not None and self.mpu is not groups and not hasattr(self.mpu, 'initialize_sequence_parallel') \
+                and hasattr(self.mpu, 'get_data_parallel_rank'):
+            return self.mpu.get_data_parallel_rank()
+        return groups.get_data_parallel_rank()
 
     def get_tensor_parallel_rank(self):
-        return self._tensor_parallel_groups().get_tensor_model_parallel_rank()
+        if self.mpu is not None and self.mpu is not groups and hasattr(self.mpu, 'get_tensor_model_parallel_rank'):
+            return self.mpu.get_tensor_model_parallel_rank()
+        return groups.get_tensor_model_parallel_rank()
 
     def get_model_parallel_rank(self):
-        return self._tensor_parallel_groups().get_model_parallel_rank()
+        if self.mpu is not None and self.mpu is not groups and hasattr(self.mpu, 'get_model_parallel_rank'):
+            return self.mpu.get_model_parallel_rank()
+        return groups.get_model_parallel_rank()
 
     def get_sequence_parallel_group(self):
         return self.seq_parallel_group
@@ -2173,7 +2183,7 @@ class DeepSpeedEngine(Module):
         # Enable optimization to parallelize checkpointing of DP state
         optimize_dp_state = not self.zero_optimization_partition_weights()
         # The checkpoint writer reads the layout from groups.mpu, which may describe another engine (#9081).
-        checkpoint_groups = _GroupsWithMPU(self.mpu) if self._owns_parallel_groups() else groups
+        checkpoint_groups = _GroupsWithMPU(self.mpu) if (self.mpu is not None and self.mpu is not groups) else groups
         self.checkpoint_engine = create_checkpoint_engine(config_params=self._config,
                                                           groups=checkpoint_groups,
                                                           zero_stage=self.zero_optimization_stage(),

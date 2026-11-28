@@ -446,18 +446,89 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert third.mpu.get_tensor_model_parallel_world_size() == 1
         assert third.dp_world_size == dist.get_world_size()
 
-    def test_storage_maps_of_a_model_on_groups_of_its_own(self):
-        # The default TP group was the process-wide one, which an engine after an explicit mpu does not create.
+    @pytest.mark.parametrize("shard", [True, False])
+    def test_storage_maps_of_a_model_on_groups_of_its_own(self, shard):
+        # The default TP group was the process-wide one, which an engine after an explicit mpu does not create;
+        # when no layer is replaced (shard=False), the group comes from the model attribute recorded by the engine.
         from deepspeed.checkpoint.zero_affine import autotp_storage_affine_maps
         build_engine(tp_size=1, mpu=HalvesMPU())
         zero1 = {"zero_allow_untested_optimizer": True, "zero_optimization": {"stage": 1}}
         autotp = build_engine(tp_size=2,
-                              shard=True,
+                              shard=shard,
                               optimizer=lambda params: torch.optim.SGD(params, lr=0.1),
                               extra_config=zero1)
         assert not autotp.mpu.process_wide
         maps = autotp_storage_affine_maps(autotp.module)
         assert set(maps) == {name for name, _ in autotp.module.named_parameters()}
+
+    @pytest.mark.parametrize("zero_extra", [
+        {
+            "stage": 3,
+            "zero_hpz_partition_size": 2
+        },
+        {
+            "stage": 2,
+            "zero_quantized_gradients": True
+        },
+    ])
+    def test_hpz_or_quantized_gradients_with_own_groups_raises(self, zero_extra):
+        # hpZ and qgZ groups are still cached process-wide over consecutive world ranks.
+        build_engine(tp_size=2)
+        extra = {"zero_allow_untested_optimizer": True, "zero_optimization": zero_extra}
+        with pytest.raises(ValueError, match="9081"):
+            build_engine(tp_size=4, optimizer=lambda params: torch.optim.SGD(params, lr=0.1), extra_config=extra)
+
+    def test_combined_tp_and_sp_mpu_is_not_inherited_without_mpu(self):
+        # A sequence_parallel_size > 1 engine without an mpu can only inherit a pure sequence-parallel mpu;
+        # inheriting one with mp_world_size > 1 leaves self.mpu None and fails reading checkpoint_mp_rank.
+        class CombinedTPSPMPU(HalvesMPU):
+
+            def get_model_parallel_world_size(self):
+                return 2
+
+            def get_sequence_parallel_world_size(self):
+                return 2
+
+            def get_sequence_parallel_group(self):
+                return self.data_parallel_group
+
+        build_engine(tp_size=1, mpu=CombinedTPSPMPU())
+        second = build_engine(tp_size=1, extra_config={"sequence_parallel_size": 2})
+        assert isinstance(second.mpu, groups.TensorParallelGroups)
+        assert second.dp_world_size == dist.get_world_size()
+
+    def test_explicit_mpu_engine_keeps_its_dp_group_after_another_explicit_mpu(self):
+        # Building a second explicit-mpu engine replaces groups.mpu; the first engine's rank getters and
+        # ZeRO-0 FP32 gradient clipping must keep using its own mpu rather than the second engine's.
+        lr, max_norm = 0.1, 0.05
+        half = dist.get_world_size() // 2
+        subset_engine = build_engine(tp_size=1,
+                                     mpu=HalvesMPU(),
+                                     optimizer=lambda params: torch.optim.SGD(params, lr=lr),
+                                     extra_config={"gradient_clipping": max_norm})
+        world_engine = build_engine(tp_size=1, mpu=WorldMPU())
+        assert groups.mpu is world_engine.mpu
+        assert subset_engine.get_data_parallel_rank() == dist.get_rank() % half
+        assert subset_engine.get_model_parallel_rank() == 0
+        assert world_engine.get_data_parallel_rank() == dist.get_rank()
+
+        scale = 1.0 if dist.get_rank() < half else 10.0
+        reference = SimpleModel(hidden_dim=8).to(subset_engine.device)
+        reference.load_state_dict(subset_engine.module.state_dict())
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=lr)
+
+        inputs = torch.full((1, 8), scale, device=subset_engine.device)
+        labels = torch.zeros(1, dtype=torch.long, device=subset_engine.device)
+        expected_loss = reference(inputs, labels)
+        expected_loss.backward()
+        torch.nn.utils.clip_grad_norm_(reference.parameters(), max_norm)
+        reference_optimizer.step()
+
+        loss = subset_engine(inputs, labels)
+        subset_engine.backward(loss)
+        subset_engine.step()
+        for actual, expected in zip(subset_engine.module.parameters(), reference.parameters()):
+            torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
     def test_autotp_engine_after_an_explicit_mpu_keeps_it(self):
         # The AutoTP engine used to publish its groups over groups.mpu, so the earlier engine's code that still
@@ -505,7 +576,8 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
                 "type": "Muon",
                 "params": {
                     "lr": 1e-3,
-                    "momentum": 0.95
+                    "momentum": 0.95,
+                    "torch_adam": True
                 }
             },
         }

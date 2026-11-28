@@ -487,8 +487,9 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
         total_norm = torch.tensor([float(moe_norm)], device=total_norm.device, dtype=torch.float)
     else:
         # Need to average total_norm across different GPUs due to the presence of moe params
-        # An engine's own TP/DP groups may differ from the process-wide ones (#9081).
-        if isinstance(mpu, groups.TensorParallelGroups):
+        # An engine's own TP/DP groups or explicit mpu may differ from the process-wide ones (#9081).
+        if mpu is not None and mpu is not groups and not hasattr(mpu, 'initialize_sequence_parallel') \
+                and hasattr(mpu, 'get_data_parallel_group'):
             pg = mpu.get_data_parallel_group()
         else:
             pg = groups._get_data_parallel_group()

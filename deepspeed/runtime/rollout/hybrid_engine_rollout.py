@@ -318,6 +318,13 @@ class HybridEngineRollout(RolloutEngine):
                 return self._generate_continuous(request, sampling, sampling.continuous_batch_size)
             return self._generate_batched(request, sampling)
 
+    def _tensor_parallel_groups(self):
+        from deepspeed.utils import groups
+        mpu = getattr(self.engine, "mpu", None)
+        if isinstance(mpu, groups.TensorParallelGroups):
+            return mpu
+        return groups
+
     def _tensor_parallel_size(self):
         """Return the AutoTP size from the engine, or from DeepSpeed's tensor-parallel group for wrapped engines."""
         autotp_size = getattr(self.engine, "autotp_size", None)
@@ -327,9 +334,8 @@ class HybridEngineRollout(RolloutEngine):
                 return size
         if not dist.is_initialized():
             return 1
-        from deepspeed.utils import groups
         try:
-            size = groups.get_tensor_model_parallel_world_size()
+            size = self._tensor_parallel_groups().get_tensor_model_parallel_world_size()
         except AssertionError:
             return 1
         logger.warning_once("HybridEngineRollout: the engine does not report autotp_size(); using the size of "
@@ -340,13 +346,12 @@ class HybridEngineRollout(RolloutEngine):
         """Share the random state across each AutoTP group, so that its ranks sample the same tokens."""
         if self._tensor_parallel_size() <= 1:
             return
-        from deepspeed.utils import groups
-
+        tp_groups = self._tensor_parallel_groups()
         accelerator = get_accelerator()
         state = accelerator.get_rng_state().to(accelerator.current_device_name())
         dist.broadcast(state,
-                       groups.get_tensor_model_parallel_src_rank(),
-                       group=groups.get_tensor_model_parallel_group())
+                       tp_groups.get_tensor_model_parallel_src_rank(),
+                       group=tp_groups.get_tensor_model_parallel_group())
         accelerator.set_rng_state(state.cpu())
 
     def _generation_kwargs(self, sampling, attention_mask, pad_token_id, module=None):
@@ -1250,8 +1255,7 @@ class HybridEngineRollout(RolloutEngine):
         if callable(autotp_size):
             autotp_size = autotp_size()
         if isinstance(autotp_size, int) and autotp_size > 1:
-            from deepspeed.utils import groups
-            capture_groups.append(groups.get_tensor_model_parallel_group())
+            capture_groups.append(self._tensor_parallel_groups().get_tensor_model_parallel_group())
         # DeepSpeedHybridEngine with inference_tp_size > 1 shards the inference
         # containers over its own mp_group, separate from the AutoTP group.
         from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine

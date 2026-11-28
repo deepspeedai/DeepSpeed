@@ -150,6 +150,35 @@ def test_capture_groups_accept_autotp_size_attribute_or_method(autotp_size, monk
     assert rollout._capture_groups() == [tp_group]
 
 
+def test_rollout_uses_the_engines_own_tp_groups_for_rng_and_capture(monkeypatch):
+    from deepspeed.runtime.rollout import hybrid_engine_rollout
+    from deepspeed.utils import groups
+
+    own_dp, own_tp = object(), object()
+    engine_groups = groups.TensorParallelGroups(own_dp, own_tp, process_wide=False)
+    monkeypatch.setattr(groups, "get_tensor_model_parallel_group", lambda:
+                        (_ for _ in ()).throw(AssertionError("read process-wide TP group")))
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: 4 if group is own_tp else 1)
+    monkeypatch.setattr(dist, "get_global_rank", lambda group, rank: 2 if (group is own_tp and rank == 0) else 0)
+
+    broadcasts = []
+    monkeypatch.setattr(dist, "broadcast", lambda tensor, src, group=None: broadcasts.append((src, group)))
+    accelerator = MagicMock()
+    accelerator.current_device_name.return_value = "cpu"
+    accelerator.get_rng_state.return_value = torch.ByteTensor([1, 2, 3])
+    monkeypatch.setattr(hybrid_engine_rollout, "get_accelerator", lambda: accelerator)
+
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = SimpleNamespace(mpu=engine_groups)
+    assert rollout._tensor_parallel_size() == 4
+    rollout._sync_rng_across_tp()
+    assert broadcasts == [(2, own_tp)]
+
+    rollout.engine = SimpleNamespace(autotp_size=lambda: 4, mpu=engine_groups)
+    assert rollout._capture_groups() == [own_tp]
+
+
 def test_recapture_is_agreed_over_the_hybrid_engine_inference_tp_group(monkeypatch):
     engine = DeepSpeedHybridEngine.__new__(DeepSpeedHybridEngine)
     engine.mp_group = object()
