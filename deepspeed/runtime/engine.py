@@ -4600,6 +4600,39 @@ class DeepSpeedEngine(Module):
         ckpt_files.sort()
         return ckpt_files
 
+    def _raise_missing_ckpt_error(self, load_dir, tag):
+        tag_dir = os.path.join(load_dir, str(tag))
+        if not os.path.isdir(tag_dir):
+            raise FileNotFoundError(f"Checkpoint directory {tag_dir} does not exist")
+
+        pp_placeholder = "0" if self.load_universal_checkpoint() else None
+        expected = os.path.basename(self._get_ckpt_name(load_dir, tag, pp_placeholder=pp_placeholder))
+        message = f"Checkpoint directory {tag_dir} has no model states file {expected} for this rank."
+
+        if self.zero_optimization_partition_weights() and not self.load_universal_checkpoint():
+            # ZeRO-3 writes one model states file per data-parallel and model-parallel rank.
+            # Count the ranks that have one, across all model-parallel ranks, from the file names.
+            import glob
+            all_ranks = self._get_ckpt_name(load_dir, tag, mp_placeholder="*", pp_placeholder="*")
+            rank_re = re.compile(r"zero_pp_rank_(\d+)_mp_rank_(\d+)_model_states\.pt$")
+            matches = [rank_re.search(path) for path in glob.glob(all_ranks)]
+            saved_dp_ranks = {int(m.group(1)) for m in matches if m}
+            saved_mp_ranks = {int(m.group(2)) for m in matches if m}
+            if saved_dp_ranks:
+                message += f" It has files for {len(saved_dp_ranks)} data-parallel and {len(saved_mp_ranks)}" \
+                    f" model-parallel rank(s); the current world sizes are {self.seq_dp_world_size}" \
+                    f" and {self.mp_world_size}."
+                dp_rank = dist.get_rank(group=self.optimizer.dp_process_group)
+                if max(saved_dp_ranks) > dp_rank:
+                    # A higher rank has a file and this one does not, so a file was lost.
+                    message += " The checkpoint is incomplete: restore the missing file."
+                else:
+                    # A smaller saved world size and lost files of the last ranks look the same here.
+                    message += " If it was saved with different world sizes, convert it with ds_to_universal.py" \
+                        " and load it with checkpoint.load_universal=true. Otherwise the checkpoint is incomplete."
+
+        raise FileNotFoundError(message)
+
     def load_checkpoint(self,
                         load_dir,
                         tag=None,
@@ -4660,6 +4693,11 @@ class DeepSpeedEngine(Module):
         if self._optimizer_has_ckpt_event_prologue():
             # Prepare for checkpoint load by ensuring all parameters are partitioned
             self.optimizer.checkpoint_event_prologue()
+
+        # Check after the prologue: some prologues are collective, and a rank that raised
+        # before them would leave the other ranks waiting.
+        if not self._get_all_ckpt_names(load_dir, tag):
+            self._raise_missing_ckpt_error(load_dir, tag)
 
         load_path, client_states = self._load_checkpoint(load_dir,
                                                          tag,
