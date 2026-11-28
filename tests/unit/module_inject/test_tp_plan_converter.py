@@ -259,6 +259,7 @@ class TestTPPlanConverter:
 
     def test_supplement_replicated_qk_norm_skips_model_without_named_parameters(self):
         """A supplied model fixture without named_parameters is not assumed to have norms."""
+
         class MockModelWithoutParams:
             pass
 
@@ -307,8 +308,10 @@ class TestTPPlanConverter:
                 self.config = MockQwen3Config()
                 self.layers = nn.ModuleList([
                     nn.ModuleDict({
-                        "self_attn": MockQwen3Attention(),
-                        "mlp": nn.ModuleDict({
+                        "self_attn":
+                        MockQwen3Attention(),
+                        "mlp":
+                        nn.ModuleDict({
                             "gate_proj": nn.Linear(32, 64),
                             "up_proj": nn.Linear(32, 64),
                             "down_proj": nn.Linear(64, 32),
@@ -348,6 +351,7 @@ class TestTPPlanConverter:
         from deepspeed.module_inject.autotp_config import AutoTPConfig
 
         class MockAttention(nn.Module):
+
             def __init__(self):
                 super().__init__()
                 self.q_proj = nn.Linear(32, 32)
@@ -356,6 +360,7 @@ class TestTPPlanConverter:
                 self.k_norm = nn.LayerNorm(32)
 
         class MockModel(nn.Module):
+
             def __init__(self):
                 super().__init__()
                 self.layers = nn.ModuleList([
@@ -419,6 +424,7 @@ class TestTPPlanConverter:
         from deepspeed.module_inject.autotp_config import AutoTPConfig
 
         class MockAttention(nn.Module):
+
             def __init__(self):
                 super().__init__()
                 self.q_proj = nn.Linear(32, 32)
@@ -427,6 +433,7 @@ class TestTPPlanConverter:
                 self.k_norm = nn.LayerNorm(32)
 
         class MockModel(nn.Module):
+
             def __init__(self):
                 super().__init__()
                 self.layers = nn.ModuleList([
@@ -469,4 +476,3 @@ class TestTPPlanConverter:
         assert norm_spec_m is not None
         assert norm_spec_m.grad_allreduce is True
         assert norm_spec_m.partition_type == PartitionType.SKIP
-

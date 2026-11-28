@@ -8,7 +8,8 @@ from typing import List, Dict, Optional, Any
 from .autotp_config import TPLayerSpec, PartitionType
 
 SUPPORTED_STYLES = {
-    "colwise", "colwise_rep", "colwise_gather_output", "rowwise", "replicated", "replicated_with_grad_allreduce", "embedding_rowwise"
+    "colwise", "colwise_rep", "colwise_gather_output", "rowwise", "replicated", "replicated_with_grad_allreduce",
+    "embedding_rowwise"
 }
 # `colwise_rep` was renamed to `colwise_gather_output` in huggingface/transformers#42809.
 # `embedding_rowwise` is injected for every tied-embedding model since huggingface/transformers#47579.
@@ -51,11 +52,10 @@ class TPPlanConverter:
         for proj in proj_to_norm:
             has_wildcard_colwise[proj] = any(
                 "*" in pattern and partition.lower() == "colwise" and pattern.endswith((f".{proj}", f".{proj}.weight"))
-                for pattern, partition in hf_tp_plan.items()
-            ) or any(
-                "*" in pattern and partition.lower() == "replicated_with_grad_allreduce" and pattern.endswith((f".{proj_to_norm[proj][0]}", f".{proj_to_norm[proj][0]}.weight"))
-                for pattern, partition in hf_tp_plan.items()
-            )
+                for pattern, partition in hf_tp_plan.items()) or any(
+                    "*" in pattern and partition.lower() == "replicated_with_grad_allreduce" and pattern.endswith(
+                        (f".{proj_to_norm[proj][0]}", f".{proj_to_norm[proj][0]}.weight"))
+                    for pattern, partition in hf_tp_plan.items())
 
         additions = {}
         for pattern, partition in list(hf_tp_plan.items()):
