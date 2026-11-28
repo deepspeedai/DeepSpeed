@@ -110,6 +110,8 @@ class PDSHRunner(MultiNodeRunner):
             f'--world_info={self.world_info_base64}', "--node_rank=%n", f"--master_addr={self.args.master_addr}",
             f"--master_port={self.args.master_port}"
         ]
+        # Take the pkill pattern before --venv_script is prepended, which shifts these indices
+        cmd_to_search = [i + "\\" for i in deepspeed_launch[2:6]]
         if self.args.venv_script is not None:
             deepspeed_launch = [f"source {self.args.venv_script};"] + deepspeed_launch
         if self.args.no_python:
@@ -122,8 +124,6 @@ class PDSHRunner(MultiNodeRunner):
             deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
         if self.args.enable_each_rank_log:
             deepspeed_launch.append(f"--enable_each_rank_log={self.args.enable_each_rank_log}")
-
-        cmd_to_search = [i + "\\" for i in deepspeed_launch[2:6]]
 
         kill_command = pdsh_cmd_args + ["pkill -f ", " ".join(cmd_to_search)[:-2]]
         return pdsh_cmd_args + deepspeed_launch + [self.user_script] + self.user_arguments, kill_command, environment
