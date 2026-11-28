@@ -367,8 +367,14 @@ class FlopsProfiler(object):
                             number_to_string(total_flops * (self.ds_engine.mp_world_size if self.ds_engine else 1))))
 
         fwd_latency = self.get_total_duration()
+        num_micro_batches = 1
         if self.ds_engine and self.ds_engine.wall_clock_breakdown():
-            fwd_latency = self.ds_engine.timers(FORWARD_GLOBAL_TIMER).elapsed(False) / 1000.0
+            # The global timers hold every micro-batch since the last optimizer step, while the flops
+            # are for one forward, so report latencies per micro-batch.
+            fwd_timer = self.ds_engine.timers(FORWARD_GLOBAL_TIMER)
+            fwd_latency = fwd_timer.elapsed(False) / 1000.0
+            num_micro_batches = max(len(fwd_timer.elapsed_records), 1)
+            fwd_latency /= num_micro_batches
         print(line_fmt.format('fwd latency: ', duration_to_string(fwd_latency)))
         print(
             line_fmt.format('fwd FLOPS per GPU = fwd flops per GPU / fwd latency: ',
@@ -376,8 +382,8 @@ class FlopsProfiler(object):
 
         if self.ds_engine and self.ds_engine.wall_clock_breakdown():
             bwd_factor = 2 + self.recompute_fwd_factor
-            bwd_latency = self.ds_engine.timers(BACKWARD_GLOBAL_TIMER).elapsed(False) / 1000.0
-            step_latency = self.ds_engine.timers(STEP_GLOBAL_TIMER).elapsed(False) / 1000.0
+            bwd_latency = self.ds_engine.timers(BACKWARD_GLOBAL_TIMER).elapsed(False) / 1000.0 / num_micro_batches
+            step_latency = self.ds_engine.timers(STEP_GLOBAL_TIMER).elapsed(False) / 1000.0 / num_micro_batches
             print(line_fmt.format('bwd latency: ', duration_to_string(bwd_latency)))
             print(
                 line_fmt.format(f'bwd FLOPS per GPU = {bwd_factor:g} * fwd flops per GPU / bwd latency: ',
@@ -395,7 +401,8 @@ class FlopsProfiler(object):
                 line_fmt.format(f'FLOPS per GPU = {bwd_factor + 1:g} * fwd flops per GPU / iter latency: ',
                                 flops_to_string((bwd_factor + 1) * total_flops / iter_latency)))
 
-            samples_per_iter = self.ds_engine.train_micro_batch_size_per_gpu() * self.ds_engine.world_size
+            # One micro-batch per data-parallel rank; model-parallel ranks share their samples.
+            samples_per_iter = self.ds_engine.train_batch_size() // self.ds_engine.gradient_accumulation_steps()
             print(line_fmt.format('samples/second: ', round(samples_per_iter / iter_latency, DEFAULT_PRECISION)))
 
         def flops_repr(module):
