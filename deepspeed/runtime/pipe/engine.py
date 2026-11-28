@@ -466,10 +466,12 @@ class PipelineEngine(DeepSpeedEngine):
             eval_output = self._reduce_outputs(self.fwd_outputs, reduce=reduce_output, micro_batches=micro_batches)
 
         if compute_loss and (bcast_loss or self.monitor.enabled):
-            eval_output = self._bcast_pipe_scalar(eval_output)
+            eval_output = self._bcast_pipe_losses(eval_output)
 
         if self.global_rank == 0 and self.monitor.enabled:
-            self.summary_events = [('Train/Samples/eval_loss', eval_output.mean().item(), self.global_samples)]
+            # with several losses, log the first; train_batch also logs only the main loss
+            eval_loss = eval_output if torch.is_tensor(eval_output) else eval_output[0]
+            self.summary_events = [('Train/Samples/eval_loss', eval_loss.mean().item(), self.global_samples)]
             self.monitor.write_events(self.summary_events)
 
         # Restore the training iterator
@@ -535,8 +537,9 @@ class PipelineEngine(DeepSpeedEngine):
             else:
                 assert isinstance(outputs, (list, tuple))
                 reduced = [torch.zeros_like(o) for o in outputs[0]]
-                for idx, out in outputs:
-                    reduced[idx] += out
+                for out in outputs:
+                    for idx, o in enumerate(out):
+                        reduced[idx] += o
 
             # Average over the microbatches
             reduced = self._scale_loss_by_gas(reduced, eval_micro_batches=micro_batches)
@@ -554,6 +557,27 @@ class PipelineEngine(DeepSpeedEngine):
             return reduced
         else:
             raise NotImplementedError(f'reduction type {reduce} not supported.')
+
+    def _bcast_pipe_losses(self, losses):
+        """Broadcast the eval loss, or the list of losses a tuple-returning loss_fn gives."""
+        src_rank = self._loss_stage_global_rank()
+        group = self.mpu.get_pipe_parallel_group()
+        # Only the loss stage knows how many losses there are (0 means a single tensor).
+        num_losses = torch.zeros(1, dtype=torch.long, device=self.device)
+        if self.global_rank == src_rank and not torch.is_tensor(losses):
+            num_losses.fill_(len(losses))
+        dist.broadcast(tensor=num_losses, src=src_rank, group=group)
+        num_losses = int(num_losses.item())
+        if num_losses == 0:
+            return self._bcast_pipe_scalar(losses, src_rank)
+
+        # Like _aggregate_total_loss, send all losses as one stacked tensor.
+        if self.global_rank == src_rank:
+            result = torch.stack([loss.detach().reshape(()) for loss in losses]).float().to(self.device)
+        else:
+            result = torch.zeros(num_losses, dtype=torch.float32, device=self.device)
+        dist.broadcast(tensor=result, src=src_rank, group=group)
+        return list(result.unbind())
 
     def _bcast_pipe_scalar(self, data, src_rank=None, dtype=torch.float32):
         # Default to last stage (e.g., for broadcasting loss)

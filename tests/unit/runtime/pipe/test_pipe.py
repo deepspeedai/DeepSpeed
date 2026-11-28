@@ -88,6 +88,45 @@ class TestPipeGradientAccumulationScaling(DistributedTest):
         assert torch.allclose(actual_weight, expected_weight)
 
 
+class TestPipeEvalTupleLoss(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("bcast_loss", [True, False])
+    def test_eval_batch_averages_each_loss(self, bcast_loss):
+        config = {
+            "train_batch_size": 2,
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 2,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": 0.1
+                }
+            },
+            "pipeline": {
+                "activation_checkpoint_interval": 0
+            },
+        }
+
+        layers = [nn.Linear(1, 1, bias=False), nn.Linear(1, 1, bias=False)]
+        for layer in layers:
+            layer.weight.data.fill_(1.0)
+
+        def loss_fn(outputs, labels):
+            mse = nn.functional.mse_loss(outputs, labels)
+            return mse, 2 * mse
+
+        model = PipelineModule(layers=layers, num_stages=2, loss_fn=loss_fn)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        data = [(torch.full((1, 1), 1.0), torch.zeros(1, 1)), (torch.full((1, 1), 3.0), torch.zeros(1, 1))]
+
+        losses = engine.eval_batch(iter(data), bcast_loss=bcast_loss)
+
+        # The weights are 1, so each MSE is x**2: (1 + 9) / 2, and the second loss is twice that.
+        if bcast_loss or engine.is_last_stage():
+            assert [loss.item() for loss in losses] == [5.0, 10.0]
+
+
 @pytest.mark.parametrize('topo_config', [
     {
         "num_pp": 1,
